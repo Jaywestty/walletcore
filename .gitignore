@@ -1,0 +1,36 @@
+# Build output
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test and coverage
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Private working notes: never committed. The port analysis lives here.
+docs/private/
+
+# Editor and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Go workspace files (keep go.mod and go.sum tracked)
+go.work
+go.work.sum
+
+# Task and migrate caches
+.task/

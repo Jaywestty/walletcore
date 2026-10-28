@@ -1,0 +1,97 @@
+version: "3"
+
+# Tasks are the single entry point for every command, the way a run.py or a
+# Makefile would be in other projects. Install: https://taskfile.dev
+#
+# Every task that needs configuration reads .env through the dotenv setting
+# below. Copy .env.example to .env first.
+
+dotenv: [".env"]
+
+vars:
+  BINARY: walletcore
+  BUILD_DIR: bin
+  MIGRATIONS_DIR: migrations
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+
+  build:
+    desc: Compile the API server and the reconcile command
+    cmds:
+      - go build -o {{.BUILD_DIR}}/api ./cmd/api
+      - go build -o {{.BUILD_DIR}}/reconcile ./cmd/reconcile
+    sources:
+      - "**/*.go"
+      - go.mod
+      - go.sum
+
+  run:
+    desc: Run the API server from source
+    cmds:
+      - go run ./cmd/api
+
+  # The race detector needs cgo, which needs a C compiler. On Windows install
+  # a gcc-compatible toolchain and set CGO_ENABLED=1. See README notes.
+  test:
+    desc: Run all tests with the race detector (requires a C compiler on Windows)
+    env:
+      CGO_ENABLED: "1"
+    cmds:
+      - go test -race ./...
+
+  test-short:
+    desc: Run all tests without the race detector (no C compiler needed)
+    cmds:
+      - go test ./...
+
+  test-integration:
+    desc: Run integration tests against the test database (requires task db-up)
+    env:
+      CGO_ENABLED: "1"
+    cmds:
+      - DATABASE_URL="$DATABASE_TEST_URL" INTEGRATION=1 go test -race ./...
+
+  fmt-check:
+    desc: Fail if any Go file is not gofmt-clean
+    cmds:
+      - |
+        files=$(gofmt -l .)
+        if [ -n "$files" ]; then
+          echo "Unformatted files:"
+          echo "$files"
+          exit 1
+        fi
+
+  migrate-up:
+    desc: Apply all outstanding migrations to DATABASE_URL
+    cmds:
+      - migrate -path {{.MIGRATIONS_DIR}} -database "$DATABASE_URL" up
+
+  migrate-up-test:
+    desc: Apply all outstanding migrations to the test database
+    cmds:
+      - migrate -path {{.MIGRATIONS_DIR}} -database "$DATABASE_TEST_URL" up
+
+  migrate-down:
+    desc: Roll back every applied migration on DATABASE_URL
+    cmds:
+      - migrate -path {{.MIGRATIONS_DIR}} -database "$DATABASE_URL" down -all
+
+  db-up:
+    desc: Start the local databases
+    cmds:
+      - docker compose up -d
+
+  db-down:
+    desc: Stop the local databases
+    cmds:
+      - docker compose down
+
+  db-wipe:
+    desc: Stop the local databases and delete their volumes
+    cmds:
+      - docker compose down -v
