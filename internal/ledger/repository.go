@@ -55,8 +55,15 @@ func (r *Repository) PostTransaction(ctx context.Context, req PostRequest) (Jour
 	if err != nil {
 		return Journal{}, fmt.Errorf("begin: %w", err)
 	}
-	// Deferred rollback. After a successful Commit this is a no-op.
-	defer func() { _ = tx.Rollback(ctx) }()
+	// Deferred rollback. After a successful Commit this is a no-op. The
+	// rollback must still be attempted if the request context is already
+	// cancelled, so it uses a context detached from cancellation with a short
+	// deadline of its own.
+	defer func() {
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(rollbackCtx)
+	}()
 
 	// For a reversal, lock and verify the original before touching balances.
 	if req.Kind == KindReversal {
@@ -71,13 +78,15 @@ func (r *Repository) PostTransaction(ctx context.Context, req PostRequest) (Jour
 		return Journal{}, err
 	}
 
-	// Lock the affected balances in ascending account id order in one query.
-	if err := r.lockBalances(ctx, tx, accounts); err != nil {
+	// Lock the affected balances in ascending account id order in one query,
+	// returning their values.
+	locked, err := r.lockBalances(ctx, tx, accounts)
+	if err != nil {
 		return Journal{}, err
 	}
 
 	// Compute and apply new balances from the locked values.
-	balances, err := r.applyBalances(ctx, tx, req.Legs, accounts)
+	balances, err := r.applyBalances(ctx, tx, req.Legs, accounts, locked)
 	if err != nil {
 		return Journal{}, err
 	}
@@ -104,7 +113,7 @@ func (r *Repository) PostTransaction(ctx context.Context, req PostRequest) (Jour
 		Fingerprint:       fingerprint,
 		Actor:             req.Actor,
 		Reason:            req.Reason,
-		Metadata:          req.Metadata,
+		Metadata:          nonNilMetadata(req.Metadata),
 		ReversesJournalID: req.ReversesJournalID,
 		OccurredAt:        req.OccurredAt,
 		Entries:           entries,
@@ -112,17 +121,36 @@ func (r *Repository) PostTransaction(ctx context.Context, req PostRequest) (Jour
 	}, nil
 }
 
+// nonNilMetadata returns an empty map for nil so callers never see a nil map.
+func nonNilMetadata(m map[string]string) map[string]string {
+	if m == nil {
+		return map[string]string{}
+	}
+	return m
+}
+
 // resolveAccounts returns a map from account reference key to resolved account
 // for every leg. Missing accounts are created with a zero balance.
+//
+// References are resolved in sorted refKey order so two concurrent postings
+// that create the same new accounts in opposite request order still insert them
+// in one global order. That prevents the two transactions from waiting on each
+// other's uncommitted rows.
 func (r *Repository) resolveAccounts(ctx context.Context, tx pgx.Tx, legs []Leg) (map[string]Account, error) {
-	out := make(map[string]Account, len(legs))
+	// Collect distinct references and sort by key.
+	seen := make(map[string]AccountRef, len(legs))
 	for _, leg := range legs {
-		key := refKey(leg.Account)
-		if _, ok := out[key]; ok {
-			continue
-		}
+		seen[refKey(leg.Account)] = leg.Account
+	}
+	keys := make([]string, 0, len(seen))
+	for k := range seen {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 
-		acct, err := r.getOrCreateAccount(ctx, tx, leg.Account)
+	out := make(map[string]Account, len(keys))
+	for _, key := range keys {
+		acct, err := r.resolveAccount(ctx, tx, seen[key])
 		if err != nil {
 			return nil, err
 		}
@@ -134,67 +162,100 @@ func (r *Repository) resolveAccounts(ctx context.Context, tx pgx.Tx, legs []Leg)
 	return out, nil
 }
 
-// getOrCreateAccount inserts the account with ON CONFLICT DO NOTHING, then
-// selects it. It also ensures a zero balance row exists.
-func (r *Repository) getOrCreateAccount(ctx context.Context, tx pgx.Tx, ref AccountRef) (Account, error) {
-	const insertAccount = `
-		INSERT INTO ledger_accounts (kind, owner_ref, currency)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (kind, owner_ref, currency) DO NOTHING`
-	if _, err := tx.Exec(ctx, insertAccount, string(ref.Kind), ref.OwnerRef, ref.Currency); err != nil {
-		return Account{}, fmt.Errorf("create account: %w", MapError(err))
-	}
-
-	var acct Account
+// resolveAccount selects an account, inserting it only when it is missing, and
+// ensures a zero balance row exists. Reading before writing avoids taking a
+// write lock on an existing account.
+func (r *Repository) resolveAccount(ctx context.Context, tx pgx.Tx, ref AccountRef) (Account, error) {
 	const selectAccount = `
 		SELECT id::text, kind, owner_ref, currency, status
 		FROM ledger_accounts
 		WHERE kind = $1 AND owner_ref = $2 AND currency = $3`
-	if err := tx.QueryRow(ctx, selectAccount, string(ref.Kind), ref.OwnerRef, ref.Currency).
-		Scan(&acct.ID, &acct.Kind, &acct.OwnerRef, &acct.Currency, &acct.Status); err != nil {
-		return Account{}, fmt.Errorf("load account: %w", MapError(err))
+
+	var acct Account
+	err := tx.QueryRow(ctx, selectAccount, string(ref.Kind), ref.OwnerRef, ref.Currency).
+		Scan(&acct.ID, &acct.Kind, &acct.OwnerRef, &acct.Currency, &acct.Status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		const insertAccount = `
+			INSERT INTO ledger_accounts (kind, owner_ref, currency)
+			VALUES ($1, $2, $3)
+			ON CONFLICT (kind, owner_ref, currency) DO NOTHING
+			RETURNING id::text, kind, owner_ref, currency, status`
+		err = tx.QueryRow(ctx, insertAccount, string(ref.Kind), ref.OwnerRef, ref.Currency).
+			Scan(&acct.ID, &acct.Kind, &acct.OwnerRef, &acct.Currency, &acct.Status)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Another transaction inserted it between our select and insert.
+			err = tx.QueryRow(ctx, selectAccount, string(ref.Kind), ref.OwnerRef, ref.Currency).
+				Scan(&acct.ID, &acct.Kind, &acct.OwnerRef, &acct.Currency, &acct.Status)
+		}
+	}
+	if err != nil {
+		return Account{}, fmt.Errorf("resolve account: %w", MapError(err))
 	}
 
-	const insertBalance = `
-		INSERT INTO ledger_balances (account_id, balance)
-		VALUES ($1, 0)
-		ON CONFLICT (account_id) DO NOTHING`
-	if _, err := tx.Exec(ctx, insertBalance, acct.ID); err != nil {
-		return Account{}, fmt.Errorf("create balance: %w", MapError(err))
+	// Ensure a balance row exists, selecting first to avoid a write on an
+	// existing row.
+	var exists bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM ledger_balances WHERE account_id = $1)`, acct.ID).Scan(&exists)
+	if err != nil {
+		return Account{}, fmt.Errorf("check balance row: %w", MapError(err))
+	}
+	if !exists {
+		const insertBalance = `
+			INSERT INTO ledger_balances (account_id, balance)
+			VALUES ($1, 0)
+			ON CONFLICT (account_id) DO NOTHING`
+		if _, err := tx.Exec(ctx, insertBalance, acct.ID); err != nil {
+			return Account{}, fmt.Errorf("create balance: %w", MapError(err))
+		}
 	}
 
 	return acct, nil
 }
 
-// lockBalances locks the balance rows for all accounts in ascending id order in
-// a single query. A single ordered SELECT ... FOR UPDATE is what makes
-// concurrent posts that touch overlapping accounts acquire locks in the same
-// order, preventing deadlock.
-func (r *Repository) lockBalances(ctx context.Context, tx pgx.Tx, accounts map[string]Account) error {
+// lockBalances locks and returns the balance rows for all accounts in
+// ascending account id order in a single query. A single ordered
+// SELECT ... FOR UPDATE is what makes concurrent posts that touch overlapping
+// accounts acquire locks in the same order, preventing deadlock. The returned
+// map is keyed by account id.
+func (r *Repository) lockBalances(ctx context.Context, tx pgx.Tx, accounts map[string]Account) (map[string]int64, error) {
 	ids := accountIDs(accounts)
 	const lockSQL = `
-		SELECT account_id::text
+		SELECT account_id::text, balance
 		FROM ledger_balances
 		WHERE account_id = ANY($1::uuid[])
 		ORDER BY account_id
 		FOR UPDATE`
 	rows, err := tx.Query(ctx, lockSQL, ids)
 	if err != nil {
-		return fmt.Errorf("lock balances: %w", MapError(err))
+		return nil, fmt.Errorf("lock balances: %w", MapError(err))
 	}
 	defer rows.Close()
+
+	locked := make(map[string]int64, len(accounts))
 	for rows.Next() {
 		var id string
-		if err := rows.Scan(&id); err != nil {
-			return fmt.Errorf("scan locked balance: %w", err)
+		var bal int64
+		if err := rows.Scan(&id, &bal); err != nil {
+			return nil, fmt.Errorf("scan locked balance: %w", err)
 		}
+		locked[id] = bal
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Every account must have exactly one locked balance row. A mismatch means
+	// an account was resolved without its balance row, which is an internal
+	// invariant failure.
+	if len(locked) != len(accounts) {
+		return nil, fmt.Errorf("lock balances: expected %d rows, got %d", len(accounts), len(locked))
+	}
+	return locked, nil
 }
 
-// applyBalances reads the locked balances, computes the delta for each leg and
-// writes the new values. It returns the resulting balances.
-func (r *Repository) applyBalances(ctx context.Context, tx pgx.Tx, legs []Leg, accounts map[string]Account) ([]Balance, error) {
+// applyBalances computes the delta for each leg and writes the new values using
+// the already-locked balances. It returns the resulting balances.
+func (r *Repository) applyBalances(ctx context.Context, tx pgx.Tx, legs []Leg, accounts map[string]Account, locked map[string]int64) ([]Balance, error) {
 	// Aggregate the net delta per account reference.
 	deltaByKey := map[string]int64{}
 	for _, leg := range legs {
@@ -205,39 +266,11 @@ func (r *Repository) applyBalances(ctx context.Context, tx pgx.Tx, legs []Leg, a
 		deltaByKey[refKey(leg.Account)] += d
 	}
 
-	// Read current balances.
-	current := map[string]int64{}
-	ids := accountIDs(accounts)
-	const readSQL = `SELECT account_id::text, balance FROM ledger_balances WHERE account_id = ANY($1::uuid[])`
-	rows, err := tx.Query(ctx, readSQL, ids)
-	if err != nil {
-		return nil, fmt.Errorf("read balances: %w", MapError(err))
-	}
-	byID := map[string]string{}
-	for key, acct := range accounts {
-		byID[acct.ID] = key
-	}
-	for rows.Next() {
-		var id string
-		var bal int64
-		if err := rows.Scan(&id, &bal); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("scan balance: %w", err)
-		}
-		if key, ok := byID[id]; ok {
-			current[key] = bal
-		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
 	// Write new values.
 	out := make([]Balance, 0, len(accounts))
 	const updateSQL = `UPDATE ledger_balances SET balance = $1, updated_at = now() WHERE account_id = $2`
 	for key, acct := range accounts {
-		newBal := current[key] + deltaByKey[key]
+		newBal := locked[acct.ID] + deltaByKey[key]
 		if _, err := tx.Exec(ctx, updateSQL, newBal, acct.ID); err != nil {
 			return nil, fmt.Errorf("update balance: %w", MapError(err))
 		}
@@ -258,7 +291,12 @@ func (r *Repository) applyBalances(ctx context.Context, tx pgx.Tx, legs []Leg, a
 
 // insertJournal writes the journal header and returns its id.
 func (r *Repository) insertJournal(ctx context.Context, tx pgx.Tx, req PostRequest, fingerprint string) (string, error) {
-	meta, err := json.Marshal(req.Metadata)
+	// A nil map must be stored as an empty JSON object, never JSON null.
+	meta := req.Metadata
+	if meta == nil {
+		meta = map[string]string{}
+	}
+	metaJSON, err := json.Marshal(meta)
 	if err != nil {
 		return "", fmt.Errorf("marshal metadata: %w", err)
 	}
@@ -276,7 +314,7 @@ func (r *Repository) insertJournal(ctx context.Context, tx pgx.Tx, req PostReque
 	var id string
 	err = tx.QueryRow(ctx, insert,
 		string(req.Kind), req.IdempotencyKey, fingerprint, req.Actor, req.Reason,
-		meta, reverses, req.OccurredAt,
+		metaJSON, reverses, req.OccurredAt,
 	).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("insert journal: %w", MapError(err))

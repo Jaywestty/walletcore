@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -57,6 +58,26 @@ func TestValidate(t *testing.T) {
 				t.Fatalf("Validate err = %v, want %v", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestIdempotencyKeyLengthByRunes(t *testing.T) {
+	// 200 multi-byte characters is 400 bytes but 200 runes, so it is valid.
+	// The database counts characters with char_length, which also counts runes.
+	multibyte := strings.Repeat("é", 200)
+	if len(multibyte) != 400 {
+		t.Fatalf("test setup: expected 400 bytes, got %d", len(multibyte))
+	}
+	req := baseReq()
+	req.IdempotencyKey = multibyte
+	if err := Validate(req); err != nil {
+		t.Fatalf("200 runes (400 bytes) should be valid, got %v", err)
+	}
+
+	// 201 characters is too long.
+	req.IdempotencyKey = strings.Repeat("é", 201)
+	if err := Validate(req); !errors.Is(err, ErrInvalidJournal) {
+		t.Fatalf("201 runes should be rejected, got %v", err)
 	}
 }
 

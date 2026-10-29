@@ -16,6 +16,8 @@ const (
 	constraintJournalKindChk     = "ledger_journals_kind_check"
 	constraintAccountUniq        = "ledger_accounts_kind_owner_currency_uniq"
 	constraintReversesUniq       = "ledger_journals_reverses_uniq"
+	constraintEntryAccountFKey   = "ledger_entries_account_id_fkey"
+	constraintEntryJournalFKey   = "ledger_entries_journal_id_fkey"
 )
 
 // SQLSTATE codes raised by the schema triggers.
@@ -72,8 +74,13 @@ func sentinelFor(pg *pgconn.PgError) error {
 		// of a foreign key. Treat it as an attempt to mutate immutable history.
 		return ErrImmutableLedger
 	case sqlstateForeignKeyViolation:
-		// An entry for a missing journal is reported as a foreign key breach.
-		return ErrAccountNotFound
+		// An entry pointing at a missing account is a not-found condition.
+		// Any other foreign key breach means the request referenced something
+		// invalid, such as a missing journal or an unknown account kind.
+		if pg.ConstraintName == constraintEntryAccountFKey {
+			return ErrAccountNotFound
+		}
+		return ErrInvalidJournal
 	case sqlstateUniqueViolation:
 		switch pg.ConstraintName {
 		case constraintIdempotencyKeyUniq:
