@@ -50,9 +50,10 @@ func run() error {
 	defer pool.Close()
 
 	handler := httpapi.NewRouter(httpapi.Options{
-		Logger:          logger,
-		ReadinessPinger: pool,
-		ReadyTimeout:    2 * time.Second,
+		Logger:            logger,
+		ReadinessPinger:   pool,
+		ReadyTimeout:      2 * time.Second,
+		TrustProxyHeaders: cfg.TrustProxyHeaders,
 	})
 
 	srv := &http.Server{
