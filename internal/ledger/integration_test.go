@@ -129,16 +129,12 @@ func TestUnbalancedRejected(t *testing.T) {
 	require.ErrorIs(t, err, ledger.ErrAccountNotFound)
 }
 
-func TestCurrencyMismatchRejected(t *testing.T) {
+func TestCrossCurrencyTransferRejectedAsUnbalanced(t *testing.T) {
 	ctx := context.Background()
 	repo := newRepo(t)
 
-	// Hand a leg whose amount currency does not match its account by using a
-	// different currency per leg. Validation catches unbalanced per currency,
-	// so to reach LD002 we post matching per-currency totals but with an entry
-	// currency that differs from the account: impossible through the public
-	// API because leg currency is the account currency. Instead, verify that a
-	// transfer across currencies is rejected as unbalanced per currency.
+	// A debit in USD and a credit in EUR form two one-sided currency groups,
+	// so the journal is unbalanced per currency and is rejected as such.
 	req := ledger.PostRequest{
 		IdempotencyKey: "xcur",
 		Kind:           ledger.KindTransfer,
@@ -248,6 +244,30 @@ func TestDuplicateIdempotencyKey(t *testing.T) {
 	// Same key, different payload.
 	_, err = repo.PostTransaction(ctx, fundReq("dup", "u2", 200))
 	require.True(t, errors.Is(err, ledger.ErrDuplicateIdempotencyKey), "want ErrDuplicateIdempotencyKey, got %v", err)
+}
+
+func TestNilMetadataStoredAsEmptyObject(t *testing.T) {
+	ctx := context.Background()
+	h := testdb.New(t)
+	pool, err := pgxpool.New(ctx, h.DSN)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	repo := ledger.NewRepository(pool)
+
+	req := fundReq("fund-u1", "u1", 100)
+	req.Metadata = nil
+	j, err := repo.PostTransaction(ctx, req)
+	require.NoError(t, err)
+	require.NotNil(t, j.Metadata, "returned metadata must never be nil")
+
+	var isNull bool
+	var jsonType string
+	err = pool.QueryRow(ctx,
+		`SELECT metadata = 'null'::jsonb, jsonb_typeof(metadata) FROM ledger_journals WHERE id = $1`, j.ID,
+	).Scan(&isNull, &jsonType)
+	require.NoError(t, err)
+	require.False(t, isNull, "metadata must not be stored as JSON null")
+	require.Equal(t, "object", jsonType, "metadata must be stored as a JSON object")
 }
 
 func TestFailedPostWritesNothing(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // maxLegs bounds a journal, matching the posting rules.
@@ -12,7 +13,7 @@ const maxLegs = 20
 // Validate checks a posting request without touching the database. It returns
 // a sentinel error describing the first problem found.
 func Validate(req PostRequest) error {
-	if strings.TrimSpace(req.IdempotencyKey) == "" || len(req.IdempotencyKey) > 200 {
+	if strings.TrimSpace(req.IdempotencyKey) == "" || utf8.RuneCountInString(req.IdempotencyKey) > 200 {
 		return fmt.Errorf("%w: idempotency key must be 1 to 200 characters", ErrInvalidJournal)
 	}
 	if !req.Kind.Valid() {
