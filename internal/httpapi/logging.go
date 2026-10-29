@@ -29,7 +29,7 @@ func LoggingMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
 				slog.Int("status", rec.status),
-				slog.Duration("duration", time.Since(start)),
+				slog.Float64("duration_ms", float64(time.Since(start).Microseconds())/1000.0),
 				slog.String("request_id", RequestID(r.Context())),
 			)
 		})
