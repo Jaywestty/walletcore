@@ -45,6 +45,14 @@ type Config struct {
 
 	// LogLevel is one of debug, info, warn, error.
 	LogLevel string
+
+	// LedgerLockTimeout is how long a posting waits for a lock before failing
+	// with ErrLockTimeout.
+	LedgerLockTimeout time.Duration
+
+	// LedgerMaxRetries is the maximum number of automatic retries for a
+	// posting that fails with a deadlock or serialization error.
+	LedgerMaxRetries int
 }
 
 // Load reads configuration from the process environment, applies defaults and
@@ -76,6 +84,12 @@ func load(getenv loader) (*Config, error) {
 
 	var err error
 	if cfg.TrustProxyHeaders, err = boolEnv(getenv, "TRUST_PROXY_HEADERS", false); err != nil {
+		return nil, err
+	}
+	if cfg.LedgerLockTimeout, err = durationEnv(getenv, "LEDGER_LOCK_TIMEOUT", 5*time.Second); err != nil {
+		return nil, err
+	}
+	if cfg.LedgerMaxRetries, err = intEnv(getenv, "LEDGER_MAX_RETRIES", 3, 0); err != nil {
 		return nil, err
 	}
 	if cfg.DBMaxConns, err = int32Env(getenv, "DB_MAX_CONNS", cfg.DBMaxConns, 1); err != nil {
@@ -157,6 +171,21 @@ func int32Env(getenv loader, name string, fallback int32, min int32) (int32, err
 		return 0, fmt.Errorf("%s must be at least %d, got %d", name, min, n)
 	}
 	return int32(n), nil
+}
+
+func intEnv(getenv loader, name string, fallback, min int) (int, error) {
+	raw := strings.TrimSpace(getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer, got %q", name, raw)
+	}
+	if n < min {
+		return 0, fmt.Errorf("%s must be at least %d, got %d", name, min, n)
+	}
+	return n, nil
 }
 
 func boolEnv(getenv loader, name string, fallback bool) (bool, error) {

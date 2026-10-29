@@ -56,6 +56,14 @@ tasks:
     cmds:
       - go test -tags integration -race -timeout 20m ./internal/ledger/ ./internal/db/migrations_test/
 
+  test-concurrency:
+    desc: Run the concurrency suite three times under the race detector
+    env:
+      CGO_ENABLED: "1"
+      INTEGRATION: "1"
+    cmds:
+      - go test -tags integration -race -count=3 -timeout 30m ./internal/ledger/
+
   fmt-check:
     desc: Fail if any Go file is not gofmt-clean
     cmds:

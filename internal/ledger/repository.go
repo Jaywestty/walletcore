@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -23,24 +24,44 @@ type Store interface {
 // Repository is the pgx implementation of Store. It owns one shared pool and
 // never mutates server state outside an explicit transaction.
 type Repository struct {
-	pool *pgxpool.Pool
+	pool         *pgxpool.Pool
+	lockTimeout  time.Duration
+	maxRetries   int
+	retries      atomic.Int64
+	beforeCommit func(ctx context.Context, tx pgx.Tx) error
+}
+
+// Options tune the posting engine.
+type Options struct {
+	// LockTimeout is applied with SET LOCAL lock_timeout at the start of every
+	// posting transaction.
+	LockTimeout time.Duration
+	// MaxRetries is the maximum number of automatic retries for a posting that
+	// fails with a deadlock or serialization error. Zero disables retries.
+	MaxRetries int
 }
 
 // NewRepository builds a Repository over a shared pool.
-func NewRepository(pool *pgxpool.Pool) *Repository {
-	return &Repository{pool: pool}
+func NewRepository(pool *pgxpool.Pool, opts Options) *Repository {
+	if opts.LockTimeout <= 0 {
+		opts.LockTimeout = 5 * time.Second
+	}
+	return &Repository{
+		pool:        pool,
+		lockTimeout: opts.LockTimeout,
+		maxRetries:  opts.MaxRetries,
+	}
 }
+
+// Retries returns how many automatic retries have happened since start. Tests
+// use it to assert the retry path did not fire.
+func (r *Repository) Retries() int64 { return r.retries.Load() }
 
 // compile-time check.
 var _ Store = (*Repository)(nil)
 
-// PostTransaction validates the request, then posts the journal and its
-// entries and updates the cached balances in a single database transaction.
-//
-// The database enforces the hard rules as a safety net: LD001 and LD002 are
-// raised by a deferred constraint trigger at COMMIT, so a failed commit must
-// never be reported as success. Errors from every step, including Commit, are
-// passed through MapError.
+// PostTransaction validates the request once, then runs the posting attempt in
+// a bounded retry loop that only retries deadlocks and serialization failures.
 func (r *Repository) PostTransaction(ctx context.Context, req PostRequest) (Journal, error) {
 	if err := Validate(req); err != nil {
 		return Journal{}, err
@@ -51,6 +72,29 @@ func (r *Repository) PostTransaction(ctx context.Context, req PostRequest) (Jour
 	}
 	fingerprint := Fingerprint(req)
 
+	var lastErr error
+	for attempt := 0; attempt <= r.maxRetries; attempt++ {
+		if attempt > 0 {
+			r.retries.Add(1)
+			if err := sleep(ctx, backoff(attempt)); err != nil {
+				return Journal{}, err
+			}
+		}
+
+		j, err := r.postOnce(ctx, req, fingerprint)
+		if err == nil {
+			return j, nil
+		}
+		lastErr = err
+		if !retryable(err) {
+			return Journal{}, err
+		}
+	}
+	return Journal{}, lastErr
+}
+
+// postOnce runs one posting attempt inside one transaction.
+func (r *Repository) postOnce(ctx context.Context, req PostRequest, fingerprint string) (Journal, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return Journal{}, fmt.Errorf("begin: %w", err)
@@ -65,27 +109,44 @@ func (r *Repository) PostTransaction(ctx context.Context, req PostRequest) (Jour
 		_ = tx.Rollback(rollbackCtx)
 	}()
 
-	// For a reversal, lock and verify the original before touching balances.
+	// Bound how long this transaction waits for any lock.
+	if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true)`, r.lockTimeoutMillis()); err != nil {
+		return Journal{}, fmt.Errorf("set lock timeout: %w", MapError(err))
+	}
+
+	// Step 1: serialize same-key retries with an advisory lock on the key, then
+	// check for an existing journal.
+	replayed, existing, err := r.checkIdempotency(ctx, tx, req, fingerprint)
+	if err != nil {
+		return Journal{}, err
+	}
+	if replayed {
+		if err := tx.Commit(ctx); err != nil {
+			return Journal{}, classifyCommitError(err)
+		}
+		return existing, nil
+	}
+
+	// Step 2: for a reversal, lock and verify the original before touching
+	// balances.
 	if req.Kind == KindReversal {
 		if err := r.verifyReversal(ctx, tx, req); err != nil {
 			return Journal{}, err
 		}
 	}
 
-	// Resolve every account, creating it and its zero balance if missing.
+	// Step 3: resolve every account in sorted order, creating missing ones.
 	accounts, err := r.resolveAccounts(ctx, tx, req.Legs)
 	if err != nil {
 		return Journal{}, err
 	}
 
-	// Lock the affected balances in ascending account id order in one query,
-	// returning their values.
+	// Step 4: lock balances in ascending account id order and read values.
 	locked, err := r.lockBalances(ctx, tx, accounts)
 	if err != nil {
 		return Journal{}, err
 	}
 
-	// Compute and apply new balances from the locked values.
 	balances, err := r.applyBalances(ctx, tx, req.Legs, accounts, locked)
 	if err != nil {
 		return Journal{}, err
@@ -101,9 +162,15 @@ func (r *Repository) PostTransaction(ctx context.Context, req PostRequest) (Jour
 		return Journal{}, err
 	}
 
+	// Test hook: simulate a failure or crash just before commit.
+	if r.beforeCommit != nil {
+		if err := r.beforeCommit(ctx, tx); err != nil {
+			return Journal{}, err
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
-		// LD001 and LD002 surface here.
-		return Journal{}, fmt.Errorf("commit: %w", MapError(err))
+		return Journal{}, classifyCommitError(err)
 	}
 
 	return Journal{
@@ -118,7 +185,112 @@ func (r *Repository) PostTransaction(ctx context.Context, req PostRequest) (Jour
 		OccurredAt:        req.OccurredAt,
 		Entries:           entries,
 		Balances:          balances,
+		Replayed:          false,
 	}, nil
+}
+
+// checkIdempotency takes the advisory lock on the key and loads an existing
+// journal. It returns (true, journal) on a same-fingerprint replay, an error on
+// a fingerprint conflict, and (false, zero) when no journal exists.
+func (r *Repository) checkIdempotency(ctx context.Context, tx pgx.Tx, req PostRequest, fingerprint string) (bool, Journal, error) {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, req.IdempotencyKey); err != nil {
+		return false, Journal{}, fmt.Errorf("advisory lock: %w", MapError(err))
+	}
+
+	const q = `
+		SELECT id::text, kind, fingerprint, actor, reason, metadata,
+		       COALESCE(reverses_journal_id::text, ''), occurred_at, posted_at
+		FROM ledger_journals
+		WHERE idempotency_key = $1`
+	var (
+		j      Journal
+		kind   string
+		metaJS []byte
+	)
+	err := tx.QueryRow(ctx, q, req.IdempotencyKey).Scan(
+		&j.ID, &kind, &j.Fingerprint, &j.Actor, &j.Reason, &metaJS,
+		&j.ReversesJournalID, &j.OccurredAt, &j.PostedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, Journal{}, nil
+	}
+	if err != nil {
+		return false, Journal{}, fmt.Errorf("load journal by key: %w", MapError(err))
+	}
+
+	if j.Fingerprint != fingerprint {
+		return false, Journal{}, fmt.Errorf("%w: key %q reused with a different payload", ErrIdempotencyConflict, req.IdempotencyKey)
+	}
+
+	j.Kind = JournalKind(kind)
+	j.IdempotencyKey = req.IdempotencyKey
+	j.Metadata = decodeMetadata(metaJS)
+	j.Replayed = true
+	if err := r.loadReplayDetails(ctx, tx, &j); err != nil {
+		return false, Journal{}, err
+	}
+	return true, j, nil
+}
+
+// loadReplayDetails fills entries and current balances for a replayed journal.
+func (r *Repository) loadReplayDetails(ctx context.Context, tx pgx.Tx, j *Journal) error {
+	const entryQ = `
+		SELECT e.id::text, e.journal_id::text, e.account_id::text, e.side, e.amount, e.currency, e.entry_seq
+		FROM ledger_entries e
+		WHERE e.journal_id = $1
+		ORDER BY e.entry_seq`
+	rows, err := tx.Query(ctx, entryQ, j.ID)
+	if err != nil {
+		return fmt.Errorf("load replay entries: %w", MapError(err))
+	}
+	for rows.Next() {
+		var e Entry
+		var side string
+		if err := rows.Scan(&e.ID, &e.JournalID, &e.AccountID, &side, &e.Amount, &e.Currency, &e.EntrySeq); err != nil {
+			rows.Close()
+			return err
+		}
+		e.Side = Side(side)
+		j.Entries = append(j.Entries, e)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Current balances for the touched accounts.
+	const balQ = `
+		SELECT a.id::text, a.kind, a.owner_ref, a.currency, b.balance
+		FROM ledger_accounts a
+		JOIN ledger_balances b ON b.account_id = a.id
+		WHERE a.id IN (SELECT DISTINCT account_id FROM ledger_entries WHERE journal_id = $1)
+		ORDER BY a.id`
+	brows, err := tx.Query(ctx, balQ, j.ID)
+	if err != nil {
+		return fmt.Errorf("load replay balances: %w", MapError(err))
+	}
+	defer brows.Close()
+	for brows.Next() {
+		var b Balance
+		var kind string
+		if err := brows.Scan(&b.AccountID, &kind, &b.Account.OwnerRef, &b.Account.Currency, &b.Amount); err != nil {
+			return err
+		}
+		b.Account.Kind = AccountKind(kind)
+		b.Currency = b.Account.Currency
+		j.Balances = append(j.Balances, b)
+	}
+	return brows.Err()
+}
+
+// lockTimeoutMillis renders the lock timeout as an integer string of
+// milliseconds for SET LOCAL lock_timeout.
+func (r *Repository) lockTimeoutMillis() string {
+	ms := r.lockTimeout.Milliseconds()
+	if ms < 1 {
+		ms = 1
+	}
+	return fmt.Sprintf("%dms", ms)
 }
 
 // nonNilMetadata returns an empty map for nil so callers never see a nil map.
@@ -127,6 +299,19 @@ func nonNilMetadata(m map[string]string) map[string]string {
 		return map[string]string{}
 	}
 	return m
+}
+
+// decodeMetadata turns stored metadata JSON into a non-nil map.
+func decodeMetadata(raw []byte) map[string]string {
+	out := map[string]string{}
+	if len(raw) == 0 || string(raw) == "null" {
+		return out
+	}
+	_ = json.Unmarshal(raw, &out)
+	if out == nil {
+		return map[string]string{}
+	}
+	return out
 }
 
 // resolveAccounts returns a map from account reference key to resolved account
@@ -254,38 +439,58 @@ func (r *Repository) lockBalances(ctx context.Context, tx pgx.Tx, accounts map[s
 }
 
 // applyBalances computes the delta for each leg and writes the new values using
-// the already-locked balances. It returns the resulting balances.
+// the already-locked balances. It returns the resulting balances. Accounts are
+// written in sorted account id order so concurrent postings that overlap take
+// row write locks in a consistent order.
 func (r *Repository) applyBalances(ctx context.Context, tx pgx.Tx, legs []Leg, accounts map[string]Account, locked map[string]int64) ([]Balance, error) {
-	// Aggregate the net delta per account reference.
+	// Aggregate the net delta per account reference with checked addition.
 	deltaByKey := map[string]int64{}
 	for _, leg := range legs {
 		d, err := Delta(leg.Account.Kind, leg.Side, leg.Amount)
 		if err != nil {
 			return nil, err
 		}
-		deltaByKey[refKey(leg.Account)] += d
+		sum, ok := checkedAdd(deltaByKey[refKey(leg.Account)], d)
+		if !ok {
+			return nil, fmt.Errorf("%w: balance delta overflow", ErrInvalidJournal)
+		}
+		deltaByKey[refKey(leg.Account)] = sum
 	}
 
-	// Write new values.
-	out := make([]Balance, 0, len(accounts))
-	const updateSQL = `UPDATE ledger_balances SET balance = $1, updated_at = now() WHERE account_id = $2`
+	// Resolve keys in sorted account id order.
+	ordered := make([]struct {
+		key  string
+		acct Account
+	}, 0, len(accounts))
 	for key, acct := range accounts {
-		newBal := locked[acct.ID] + deltaByKey[key]
-		if _, err := tx.Exec(ctx, updateSQL, newBal, acct.ID); err != nil {
+		ordered = append(ordered, struct {
+			key  string
+			acct Account
+		}{key, acct})
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].acct.ID < ordered[j].acct.ID })
+
+	out := make([]Balance, 0, len(ordered))
+	const updateSQL = `UPDATE ledger_balances SET balance = $1, updated_at = now() WHERE account_id = $2`
+	for _, o := range ordered {
+		newBal, ok := checkedAdd(locked[o.acct.ID], deltaByKey[o.key])
+		if !ok {
+			return nil, fmt.Errorf("%w: balance overflow", ErrInvalidJournal)
+		}
+		if _, err := tx.Exec(ctx, updateSQL, newBal, o.acct.ID); err != nil {
 			return nil, fmt.Errorf("update balance: %w", MapError(err))
 		}
 		out = append(out, Balance{
-			AccountID: acct.ID,
+			AccountID: o.acct.ID,
 			Account: AccountRef{
-				Kind:     acct.Kind,
-				OwnerRef: acct.OwnerRef,
-				Currency: acct.Currency,
+				Kind:     o.acct.Kind,
+				OwnerRef: o.acct.OwnerRef,
+				Currency: o.acct.Currency,
 			},
 			Amount:   newBal,
-			Currency: acct.Currency,
+			Currency: o.acct.Currency,
 		})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].AccountID < out[j].AccountID })
 	return out, nil
 }
 

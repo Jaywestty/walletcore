@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -9,6 +10,13 @@ import (
 
 // maxLegs bounds a journal, matching the posting rules.
 const maxLegs = 20
+
+// MaxAmount is the largest amount allowed on a single leg, in minor units.
+// It is 1,000,000,000,000 (one trillion minor units). With at most 20 legs the
+// largest possible per-currency total is 2e13, which fits comfortably in int64,
+// so per-leg checks alone would not overflow. The bound also keeps amounts
+// within a range any consumer can handle and rejects absurd values early.
+const MaxAmount int64 = 1_000_000_000_000
 
 // Validate checks a posting request without touching the database. It returns
 // a sentinel error describing the first problem found.
@@ -58,11 +66,20 @@ func Validate(req PostRequest) error {
 		if leg.Amount <= 0 {
 			return fmt.Errorf("%w: leg %d amount must be positive", ErrInvalidAmount, i)
 		}
-		if leg.Side == Debit {
-			dr[leg.Account.Currency] += leg.Amount
-		} else {
-			cr[leg.Account.Currency] += leg.Amount
+		if leg.Amount > MaxAmount {
+			return fmt.Errorf("%w: leg %d amount exceeds maximum %d", ErrInvalidAmount, i, MaxAmount)
 		}
+
+		// Sum with a checked add so a per-currency total can never wrap.
+		target := cr
+		if leg.Side == Debit {
+			target = dr
+		}
+		next, ok := checkedAdd(target[leg.Account.Currency], leg.Amount)
+		if !ok {
+			return fmt.Errorf("%w: %s total would overflow", ErrInvalidJournal, leg.Account.Currency)
+		}
+		target[leg.Account.Currency] = next
 	}
 
 	// Every currency that appears must balance.
@@ -80,6 +97,18 @@ func Validate(req PostRequest) error {
 	}
 
 	return nil
+}
+
+// checkedAdd returns a+b and whether the result fits in int64. Both inputs are
+// non-negative in this package, so overflow is detected by a negative result.
+func checkedAdd(a, b int64) (int64, bool) {
+	if b > 0 && a > math.MaxInt64-b {
+		return 0, false
+	}
+	if b < 0 && a < math.MinInt64-b {
+		return 0, false
+	}
+	return a + b, true
 }
 
 // ValidKind reports whether k is one of the four account kinds.

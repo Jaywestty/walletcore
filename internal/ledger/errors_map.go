@@ -17,7 +17,6 @@ const (
 	constraintAccountUniq        = "ledger_accounts_kind_owner_currency_uniq"
 	constraintReversesUniq       = "ledger_journals_reverses_uniq"
 	constraintEntryAccountFKey   = "ledger_entries_account_id_fkey"
-	constraintEntryJournalFKey   = "ledger_entries_journal_id_fkey"
 )
 
 // SQLSTATE codes raised by the schema triggers.
@@ -26,6 +25,12 @@ const (
 	sqlstateForeignKeyViolation = "23503"
 	sqlstateUniqueViolation     = "23505"
 	sqlstateCheckViolation      = "23514"
+	sqlstateLockNotAvailable    = "55P03"
+	sqlstateDeadlockDetected    = "40P01"
+	sqlstateSerializationFail   = "40001"
+	sqlstateQueryCanceled       = "57014"
+	sqlstateAdminShutdown       = "57P01"
+	sqlstateConnectionFailure   = "08006"
 	sqlstateUnbalanced          = "LD001"
 	sqlstateCurrency            = "LD002"
 	sqlstateNegative            = "LD003"
@@ -69,6 +74,12 @@ func sentinelFor(pg *pgconn.PgError) error {
 		return ErrImmutableLedger
 	case sqlstateOutsideJournalTxn:
 		return ErrEntryOutsideJournal
+	case sqlstateLockNotAvailable:
+		return ErrLockTimeout
+	case sqlstateDeadlockDetected:
+		return ErrDeadlockDetected
+	case sqlstateSerializationFail:
+		return ErrSerializationFailure
 	case sqlstateFeatureNotSupported:
 		// 0A000 here means a TRUNCATE on a protected table was refused because
 		// of a foreign key. Treat it as an attempt to mutate immutable history.
@@ -84,7 +95,9 @@ func sentinelFor(pg *pgconn.PgError) error {
 	case sqlstateUniqueViolation:
 		switch pg.ConstraintName {
 		case constraintIdempotencyKeyUniq:
-			return ErrDuplicateIdempotencyKey
+			// With the advisory lock held first, a unique violation on the key
+			// means the same key was used with a different payload.
+			return ErrIdempotencyConflict
 		case constraintReversesUniq:
 			return ErrAlreadyReversed
 		case constraintAccountUniq:

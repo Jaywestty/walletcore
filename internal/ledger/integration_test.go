@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
@@ -25,7 +26,7 @@ func newRepo(t *testing.T) *ledger.Repository {
 	pool, err := pgxpool.New(context.Background(), h.DSN)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-	return ledger.NewRepository(pool)
+	return ledger.NewRepository(pool, ledger.Options{LockTimeout: 5 * time.Second})
 }
 
 func ref(kind ledger.AccountKind, owner, currency string) ledger.AccountRef {
@@ -155,7 +156,7 @@ func TestSuspendedAccountRejected(t *testing.T) {
 	pool, err := pgxpool.New(ctx, h.DSN)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-	repo := ledger.NewRepository(pool)
+	repo := ledger.NewRepository(pool, ledger.Options{LockTimeout: 5 * time.Second})
 
 	// Create then suspend u1.
 	_, err = repo.PostTransaction(ctx, fundReq("fund-u1", "u1", 100))
@@ -241,9 +242,9 @@ func TestDuplicateIdempotencyKey(t *testing.T) {
 	_, err := repo.PostTransaction(ctx, fundReq("dup", "u1", 100))
 	require.NoError(t, err)
 
-	// Same key, different payload.
+	// Same key, different payload is a conflict.
 	_, err = repo.PostTransaction(ctx, fundReq("dup", "u2", 200))
-	require.True(t, errors.Is(err, ledger.ErrDuplicateIdempotencyKey), "want ErrDuplicateIdempotencyKey, got %v", err)
+	require.True(t, errors.Is(err, ledger.ErrIdempotencyConflict), "want ErrIdempotencyConflict, got %v", err)
 }
 
 func TestNilMetadataStoredAsEmptyObject(t *testing.T) {
@@ -252,7 +253,7 @@ func TestNilMetadataStoredAsEmptyObject(t *testing.T) {
 	pool, err := pgxpool.New(ctx, h.DSN)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-	repo := ledger.NewRepository(pool)
+	repo := ledger.NewRepository(pool, ledger.Options{LockTimeout: 5 * time.Second})
 
 	req := fundReq("fund-u1", "u1", 100)
 	req.Metadata = nil
@@ -276,7 +277,7 @@ func TestFailedPostWritesNothing(t *testing.T) {
 	pool, err := pgxpool.New(ctx, h.DSN)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-	repo := ledger.NewRepository(pool)
+	repo := ledger.NewRepository(pool, ledger.Options{LockTimeout: 5 * time.Second})
 
 	_, err = repo.PostTransaction(ctx, fundReq("fund", "u1", 100))
 	require.NoError(t, err)

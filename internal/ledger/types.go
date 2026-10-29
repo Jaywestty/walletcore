@@ -114,6 +114,11 @@ type Journal struct {
 	PostedAt          time.Time
 	Entries           []Entry
 	Balances          []Balance
+
+	// Replayed is true when this result came from an existing journal that was
+	// returned for an idempotent retry rather than posted now. Balances on a
+	// replay are the current values, not the values at original posting time.
+	Replayed bool
 }
 
 // Entry is one persisted leg.

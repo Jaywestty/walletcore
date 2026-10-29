@@ -82,10 +82,3 @@ func canonicalLegLess(a, b canonicalLeg) bool {
 	}
 	return a.Amount < b.Amount
 }
-
-// SortedLegKeys returns the canonical leg ordering for tests and diagnostics.
-func SortedLegKeys(legs []Leg) []string {
-	keys := canonicalLegKeys(legs)
-	sort.Strings(keys)
-	return keys
-}

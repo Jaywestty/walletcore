@@ -123,3 +123,71 @@ Concurrent postings that touch overlapping accounts must acquire row locks in
 the same order, or they can deadlock. Locking every affected balance in one
 `ORDER BY account_id ... FOR UPDATE` statement guarantees a global order, so two
 transactions can never hold one lock and wait for the other.
+
+### Amount limits and overflow
+
+A single leg may not exceed `MaxAmount`, which is 1,000,000,000,000 minor units
+(one trillion). The value is well inside int64 and keeps every consumer able to
+represent an amount without special handling. Beyond that bound, callers are
+almost certainly sending the wrong unit.
+
+Even with that bound, per-currency totals and balance updates use checked
+addition. With at most twenty legs the largest possible total is 2e13, so it
+cannot overflow today, but performing the addition through a checked helper
+means a future change to the leg count or the amount bound cannot introduce a
+silent wrap. A per-currency sum or a balance that would overflow returns
+`ErrInvalidJournal`; a single leg above `MaxAmount` returns `ErrInvalidAmount`.
+
+## Concurrency and idempotency
+
+Every posting acquires locks in one fixed order, with no exceptions:
+
+1. A transaction-scoped advisory lock on the idempotency key.
+2. For a reversal, the original journal row with `FOR UPDATE`.
+3. Accounts, resolved in sorted `refKey` order.
+4. Balance rows with `FOR UPDATE`, ordered by account id ascending.
+
+Because every path requests these resources in the same total order, a wait-for
+cycle is impossible: transaction A can only wait on a resource that transaction
+B took, and B took it only at a step earlier than or equal to A's current step
+in the same order, so a cycle back to A cannot close. This is the same argument
+as locking accounts in id order, extended to the key lock and the original
+journal.
+
+### Idempotency
+
+The posting engine takes `pg_advisory_xact_lock(hashtextextended(key, 0))` at the
+start of the transaction, then loads any journal with that key.
+
+- Same key and same fingerprint: the original journal is returned with its
+  entries and `Replayed = true`. A replay performs no balance work, so it
+  succeeds even if accounts are now suspended or funds are now too low. The
+  balances reported on a replay are the current values for the touched
+  accounts, not the historical values at original posting time.
+- Same key and different fingerprint: `ErrIdempotencyConflict`. Any difference
+  in kind, legs, actor, reason or reversal target is a conflict. Metadata and
+  occurrence time are not part of the fingerprint and may differ freely.
+- No journal found: the normal posting path runs. The unique index on the key
+  remains the hard guarantee. A `23505` on the key after acquiring the advisory
+  lock would indicate a bug and is mapped to `ErrIdempotencyConflict`.
+
+The advisory lock serializes same-key retries before any row lock is taken, and
+under READ COMMITTED each statement sees the latest committed snapshot, so a
+retry that waited on the lock then re-reads the row the first attempt committed.
+
+### Commit failure classification
+
+A rejection from the database before `COMMIT` is a definite failure: nothing was
+persisted. A `COMMIT` that returns a database rejection (a constraint, a trigger,
+or the ledger's own SQLSTATE class) is also definite: the transaction did not
+commit. Any other commit error, such as a context deadline, a closed connection
+or SQLSTATE class 08 or 57P01, is ambiguous: the commit may or may not have been
+durable. Such a case returns `ErrOutcomeUnknown` and the caller must resolve it
+by retrying with the same idempotency key, which will either replay the committed
+journal or post it once.
+
+Lock and concurrency SQLSTATEs are classified for the caller:
+`55P03` maps to `ErrLockTimeout`, `40P01` to `ErrDeadlockDetected` and `40001`
+to `ErrSerializationFailure`. Only the last two are retried automatically,
+within a bounded attempt budget; `ErrOutcomeUnknown` is never retried inside the
+engine because the caller owns that decision.
