@@ -58,6 +58,37 @@ func TestLoadOverrides(t *testing.T) {
 	}
 }
 
+func TestTrustProxyHeaders(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"default off", "", false},
+		{"enabled", "true", true},
+		{"enabled numeric", "1", true},
+		{"disabled", "false", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"DATABASE_URL": "postgres://x"}
+			if tc.raw != "" {
+				env["TRUST_PROXY_HEADERS"] = tc.raw
+			}
+			cfg, err := load(envMap(env))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.TrustProxyHeaders != tc.want {
+				t.Fatalf("TrustProxyHeaders = %v, want %v", cfg.TrustProxyHeaders, tc.want)
+			}
+		})
+	}
+	if _, err := load(envMap(map[string]string{"DATABASE_URL": "postgres://x", "TRUST_PROXY_HEADERS": "maybe"})); err == nil {
+		t.Fatal("expected error for invalid boolean")
+	}
+}
+
 func TestLoadValidationErrors(t *testing.T) {
 	tests := []struct {
 		name    string
