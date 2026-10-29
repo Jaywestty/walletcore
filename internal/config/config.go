@@ -38,6 +38,11 @@ type Config struct {
 	// ShutdownTimeout bounds graceful shutdown so in-flight requests finish.
 	ShutdownTimeout time.Duration
 
+	// TrustProxyHeaders enables deriving the client IP from proxy headers such
+	// as X-Forwarded-For. It defaults to false and should only be enabled when
+	// the service sits behind a trusted reverse proxy.
+	TrustProxyHeaders bool
+
 	// LogLevel is one of debug, info, warn, error.
 	LogLevel string
 }
@@ -70,6 +75,9 @@ func load(getenv loader) (*Config, error) {
 	}
 
 	var err error
+	if cfg.TrustProxyHeaders, err = boolEnv(getenv, "TRUST_PROXY_HEADERS", false); err != nil {
+		return nil, err
+	}
 	if cfg.DBMaxConns, err = int32Env(getenv, "DB_MAX_CONNS", cfg.DBMaxConns, 1); err != nil {
 		return nil, err
 	}
@@ -149,6 +157,21 @@ func int32Env(getenv loader, name string, fallback int32, min int32) (int32, err
 		return 0, fmt.Errorf("%s must be at least %d, got %d", name, min, n)
 	}
 	return int32(n), nil
+}
+
+func boolEnv(getenv loader, name string, fallback bool) (bool, error) {
+	raw := strings.TrimSpace(getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	switch strings.ToLower(raw) {
+	case "1", "true", "yes", "on":
+		return true, nil
+	case "0", "false", "no", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s must be a boolean such as true or false, got %q", name, raw)
+	}
 }
 
 func durationEnv(getenv loader, name string, fallback time.Duration) (time.Duration, error) {
