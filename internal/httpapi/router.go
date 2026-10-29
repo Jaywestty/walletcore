@@ -27,6 +27,9 @@ type Options struct {
 	// ReadyTimeout bounds the database probe so readyz answers promptly even
 	// when the database hangs.
 	ReadyTimeout time.Duration
+	// TrustProxyHeaders enables using X-Forwarded-For and similar headers to
+	// determine the client IP. Only enable behind a trusted reverse proxy.
+	TrustProxyHeaders bool
 }
 
 // NewRouter builds the application router. Routes live here so main only wires
@@ -36,7 +39,7 @@ func NewRouter(opts Options) http.Handler {
 		opts.ReadyTimeout = 2 * time.Second
 	}
 
-	r := newRouter()
+	r := newRouter(opts.TrustProxyHeaders)
 	if opts.Logger != nil {
 		r.Use(LoggingMiddleware(opts.Logger))
 	}
