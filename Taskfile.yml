@@ -49,11 +49,12 @@ tasks:
       - go test ./...
 
   test-integration:
-    desc: Run integration tests against the test database (requires task db-up)
+    desc: Run schema integration tests against throwaway Docker Postgres containers
     env:
       CGO_ENABLED: "1"
+      INTEGRATION: "1"
     cmds:
-      - DATABASE_URL="$DATABASE_TEST_URL" INTEGRATION=1 go test -race ./...
+      - go test -tags integration -race -timeout 20m ./internal/db/migrations_test/
 
   fmt-check:
     desc: Fail if any Go file is not gofmt-clean
