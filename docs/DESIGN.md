@@ -89,3 +89,37 @@ transaction's changes are visible to the check. In Go this means the individual
 currency error surfaces on `tx.Commit()`. The posting engine must treat a
 commit error carrying LD001 or LD002 as a domain error, not a transport
 failure, and must not retry it in a new transaction.
+
+## Ledger posting and balance convention
+
+The posting engine is Go code in `internal/ledger`, not a database function.
+The database is only the safety net described above. A single call to
+`Repository.PostTransaction` runs one explicit transaction and does the
+following in a fixed order:
+
+1. Validate the request and compute a fingerprint (pure, no database).
+2. Resolve every account, creating it and its zero balance if missing.
+3. Lock the affected balance rows with `SELECT ... FOR UPDATE` ordered by
+   account id ascending, in one query.
+4. Compute the new balances from the locked values and update them.
+5. Insert the journal, then its entries, in the same transaction.
+6. Commit. LD001 and LD002 surface here.
+
+### Balance sign convention
+
+The cached `ledger_balances.balance` is stored normal-side positive for every
+account kind. For `user_wallet`, `holds` and `fees` (credit normal) the balance
+is credits minus debits. For `settlement` (debit normal) the balance is debits
+minus credits. A positive balance therefore always means the account holds
+value on its normal side, and only `settlement` may go negative.
+
+The engine computes the change for each leg with one pure function,
+`Delta(kind, side, amount)`: it returns `+amount` when the side equals the
+kind's normal side and `-amount` otherwise.
+
+### Why locks are ordered by account id
+
+Concurrent postings that touch overlapping accounts must acquire row locks in
+the same order, or they can deadlock. Locking every affected balance in one
+`ORDER BY account_id ... FOR UPDATE` statement guarantees a global order, so two
+transactions can never hold one lock and wait for the other.

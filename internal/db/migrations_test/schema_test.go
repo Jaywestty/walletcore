@@ -10,7 +10,15 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Jaywestty/walletcore/internal/testdb"
 )
+
+// TestMain starts one Postgres container and migrates a template once; every
+// test gets a cheap clone.
+func TestMain(m *testing.M) {
+	testdb.Main(m)
+}
 
 // SQLSTATE codes raised by the ledger triggers. They are asserted by code, not
 // by message text, so wording changes never break a test.
@@ -51,13 +59,11 @@ func pgErrCode(t *testing.T, err error) string {
 	return pgErr(t, err).Code
 }
 
-// newDB starts a container, applies all migrations and returns the handle.
-func newDB(t *testing.T) (*sql.DB, string) {
+// newDB returns a fresh cloned database with the schema applied.
+func newDB(t *testing.T) (*sql.DB, testdb.Handle) {
 	t.Helper()
-	db, dsn, cleanup := startPostgres(t)
-	t.Cleanup(cleanup)
-	migrateUp(t, dsn)
-	return db, dsn
+	h := testdb.New(t)
+	return h.DB, h
 }
 
 // createAccount inserts an account and returns its id.
@@ -502,10 +508,10 @@ func TestEntrySeqIndexExists(t *testing.T) {
 }
 
 func TestMigrateDownThenUp(t *testing.T) {
-	db, dsn := newDB(t)
+	db, h := newDB(t)
 	createAccount(t, db, "user_wallet", "u1", "USD")
 
-	migrateDownAll(t, dsn)
+	testdb.MigrateDown(t, h)
 
 	var exists bool
 	err := db.QueryRow(`SELECT EXISTS (
@@ -514,7 +520,7 @@ func TestMigrateDownThenUp(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, exists, "ledger_accounts should be dropped by the down migration")
 
-	migrateUp(t, dsn)
+	testdb.MigrateUp(t, h)
 
 	err = db.QueryRow(`SELECT EXISTS (
 		SELECT 1 FROM information_schema.tables WHERE table_name = 'ledger_accounts'
