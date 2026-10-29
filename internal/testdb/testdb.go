@@ -94,6 +94,8 @@ func Main(m *testing.M) {
 		tcpostgres.WithDatabase(baseDB),
 		tcpostgres.WithUsername(user),
 		tcpostgres.WithPassword(password),
+		// Allow enough connections for the 100-goroutine concurrency tests.
+		testcontainers.WithCmdArgs("-c", "max_connections=500"),
 		testcontainers.WithWaitStrategy(
 			// The alpine entrypoint logs readiness twice (init then temp
 			// server). Waiting for the second occurrence plus the listening

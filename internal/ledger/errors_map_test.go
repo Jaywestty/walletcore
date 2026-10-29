@@ -21,14 +21,17 @@ func TestMapError(t *testing.T) {
 		{"outside txn", sqlstateOutsideJournalTxn, "", ErrEntryOutsideJournal},
 		{"truncate fk", sqlstateFeatureNotSupported, "", ErrImmutableLedger},
 		{"entry missing account", sqlstateForeignKeyViolation, constraintEntryAccountFKey, ErrAccountNotFound},
-		{"missing journal fk", sqlstateForeignKeyViolation, constraintEntryJournalFKey, ErrInvalidJournal},
-		{"dup key", sqlstateUniqueViolation, constraintIdempotencyKeyUniq, ErrDuplicateIdempotencyKey},
+		{"missing journal fk", sqlstateForeignKeyViolation, "ledger_entries_journal_id_fkey", ErrInvalidJournal},
+		{"dup key", sqlstateUniqueViolation, constraintIdempotencyKeyUniq, ErrIdempotencyConflict},
 		{"already reversed", sqlstateUniqueViolation, constraintReversesUniq, ErrAlreadyReversed},
 		{"account uniq", sqlstateUniqueViolation, constraintAccountUniq, ErrInvalidJournal},
 		{"amount check", sqlstateCheckViolation, constraintAmountPositiveChk, ErrInvalidAmount},
 		{"reversal pairing", sqlstateCheckViolation, constraintReversalPairingChk, ErrInvalidJournal},
 		{"journal kind", sqlstateCheckViolation, constraintJournalKindChk, ErrInvalidJournal},
 		{"key check", sqlstateCheckViolation, constraintIdempotencyKeyChk, ErrInvalidJournal},
+		{"lock timeout", sqlstateLockNotAvailable, "", ErrLockTimeout},
+		{"deadlock", sqlstateDeadlockDetected, "", ErrDeadlockDetected},
+		{"serialization", sqlstateSerializationFail, "", ErrSerializationFailure},
 	}
 
 	for _, tc := range tests {

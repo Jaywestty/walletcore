@@ -28,10 +28,6 @@ var (
 	// transaction that created their journal. Mapped from SQLSTATE LD005.
 	ErrEntryOutsideJournal = errors.New("ledger: entry outside journal transaction")
 
-	// ErrDuplicateIdempotencyKey means the key was already used. Mapped from
-	// constraint ledger_journals_idempotency_key_uniq.
-	ErrDuplicateIdempotencyKey = errors.New("ledger: duplicate idempotency key")
-
 	// ErrAlreadyReversed means the original journal was already reversed.
 	// Mapped from constraint ledger_journals_reverses_uniq.
 	ErrAlreadyReversed = errors.New("ledger: journal already reversed")
@@ -41,6 +37,24 @@ var (
 
 	// ErrInvalidJournal means the journal shape or kind is invalid.
 	ErrInvalidJournal = errors.New("ledger: invalid journal")
+
+	// ErrIdempotencyConflict means the key was reused with a different payload.
+	ErrIdempotencyConflict = errors.New("ledger: idempotency conflict")
+
+	// ErrOutcomeUnknown means a commit returned an error that is not a definite
+	// database rejection, so the transaction may or may not have committed.
+	// The caller must resolve it by retrying with the same idempotency key.
+	ErrOutcomeUnknown = errors.New("ledger: outcome unknown")
+
+	// ErrLockTimeout means a row or table lock could not be acquired in time.
+	ErrLockTimeout = errors.New("ledger: lock timeout")
+
+	// ErrDeadlockDetected means the database detected a deadlock and aborted
+	// this transaction.
+	ErrDeadlockDetected = errors.New("ledger: deadlock detected")
+
+	// ErrSerializationFailure means the transaction could not be serialized.
+	ErrSerializationFailure = errors.New("ledger: serialization failure")
 
 	// ErrAccountInactive means the account exists but is not active.
 	ErrAccountInactive = errors.New("ledger: account inactive")
