@@ -18,10 +18,12 @@ const RequestIDHeader = "X-Request-Id"
 //
 // Middleware order matters: the request id is assigned first so every later
 // log line and recovered panic can reference it.
-func newRouter() *chi.Mux {
+func newRouter(trustProxyHeaders bool) *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(requestIDMiddleware)
-	r.Use(middleware.RealIP)
+	if trustProxyHeaders {
+		r.Use(middleware.RealIP)
+	}
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(15 * time.Second))
 	return r
