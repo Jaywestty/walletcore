@@ -16,6 +16,8 @@ const (
 	constraintJournalKindChk     = "ledger_journals_kind_check"
 	constraintAccountUniq        = "ledger_accounts_kind_owner_currency_uniq"
 	constraintReversesUniq       = "ledger_journals_reverses_uniq"
+	constraintSettlesUniq        = "ledger_journals_settles_uniq"
+	constraintSettlementPairing  = "ledger_journals_settlement_pairing_check"
 	constraintEntryAccountFKey   = "ledger_entries_account_id_fkey"
 )
 
@@ -100,6 +102,8 @@ func sentinelFor(pg *pgconn.PgError) error {
 			return ErrIdempotencyConflict
 		case constraintReversesUniq:
 			return ErrAlreadyReversed
+		case constraintSettlesUniq:
+			return ErrWithdrawalAlreadySettled
 		case constraintAccountUniq:
 			return ErrInvalidJournal
 		}
@@ -107,7 +111,8 @@ func sentinelFor(pg *pgconn.PgError) error {
 		switch pg.ConstraintName {
 		case constraintAmountPositiveChk:
 			return ErrInvalidAmount
-		case constraintReversalPairingChk, constraintJournalKindChk, constraintIdempotencyKeyChk:
+		case constraintReversalPairingChk, constraintJournalKindChk, constraintIdempotencyKeyChk,
+			constraintSettlementPairing:
 			return ErrInvalidJournal
 		}
 	}
