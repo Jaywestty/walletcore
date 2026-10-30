@@ -50,6 +50,7 @@ func TestFingerprintEachFieldMatters(t *testing.T) {
 		"actor":    func(r *PostRequest) { r.Actor = "someone" },
 		"reason":   func(r *PostRequest) { r.Reason = "other" },
 		"reversal": func(r *PostRequest) { r.ReversesJournalID = "j2" },
+		"settles":  func(r *PostRequest) { r.SettlesJournalID = "s2" },
 		"key":      func(r *PostRequest) { r.IdempotencyKey = "key-2" },
 		"leg amount": func(r *PostRequest) {
 			r.Legs[0].Amount = 101
