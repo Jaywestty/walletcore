@@ -191,3 +191,34 @@ Lock and concurrency SQLSTATEs are classified for the caller:
 to `ErrSerializationFailure`. Only the last two are retried automatically,
 within a bounded attempt budget; `ErrOutcomeUnknown` is never retried inside the
 engine because the caller owns that decision.
+
+## Known limitations
+
+These are accepted trade-offs, not bugs, and each has a mitigation.
+
+### Acknowledgment-lost ambiguous commit
+
+If the connection fails while the server is processing COMMIT, the client sees
+`ErrOutcomeUnknown`: the commit may or may not be durable. The engine does not
+retry this case itself because a second write could double-post if the first
+did commit. The caller resolves it by retrying the same request with the same
+idempotency key. That retry either replays the committed journal or posts it
+once, so stability comes from the key, not from the transport.
+
+### Advisory lock hash collisions
+
+The idempotency serialization uses `pg_advisory_xact_lock(hashtextextended(key,
+0))`, a 64-bit hash of the key. Two different keys can hash to the same value.
+When that happens the two postings serialize unnecessarily but remain correct:
+they touch different journals, and the lock only slows them. Collisions become
+more likely with a very large number of concurrent distinct keys; the cost is
+extra waiting, never incorrect data.
+
+### Cached balances read without a lock on replay
+
+A replay returns the current balances for the touched accounts by reading the
+projection without taking `FOR UPDATE`. Because the replay does no balance work
+and only reports state, a concurrent posting may change those balances during
+the read. The values returned are therefore a recent, not a frozen, snapshot.
+Callers that need a strictly consistent read of balances should query them
+after their own write, not rely on the balances embedded in a replay result.

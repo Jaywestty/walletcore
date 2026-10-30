@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && concurrency
 
 package ledger
 
@@ -555,6 +555,54 @@ func TestContextCancelWhileBlocked(t *testing.T) {
 
 	// The same key now posts successfully (nothing persisted while blocked).
 	_, err = repo.PostTransaction(context.Background(), transferReq("blocked", "u1", "u2", 100))
+	require.NoError(t, err)
+
+	b1, err := repo.Balance(context.Background(), uref("u1"))
+	require.NoError(t, err)
+	require.EqualValues(t, 900, b1)
+	assertInvariants(t, pool)
+}
+
+// 11. Lock timeout: a held row lock makes a posting wait, then fail with
+// ErrLockTimeout when the configured lock timeout elapses.
+func TestLockTimeout(t *testing.T) {
+	pool := newPool(t)
+	// A short lock timeout and a long context: the failure must come from the
+	// lock timeout, not from the context deadline.
+	repo := NewRepository(pool, Options{LockTimeout: 300 * time.Millisecond})
+
+	fund(t, repo, "seed", "u1", 1000)
+
+	// Hold a FOR UPDATE lock on u1's balance row in a separate transaction.
+	holder, err := pool.Begin(context.Background())
+	require.NoError(t, err)
+	var u1ID string
+	require.NoError(t, holder.QueryRow(context.Background(),
+		`SELECT id::text FROM ledger_accounts WHERE kind = 'user_wallet' AND owner_ref = 'u1'`).Scan(&u1ID))
+	_, err = holder.Exec(context.Background(), `SELECT 1 FROM ledger_balances WHERE account_id = $1 FOR UPDATE`, u1ID)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err = repo.PostTransaction(ctx, transferReq("locked", "u1", "u2", 100))
+	require.True(t, errors.Is(err, ErrLockTimeout), "want ErrLockTimeout, got %v", err)
+
+	// Nothing persisted: no journal for this key and no locks left behind.
+	var journals int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM ledger_journals WHERE idempotency_key = 'locked'`).Scan(&journals))
+	require.Zero(t, journals, "a lock-timeout post must not persist a journal")
+
+	// The holder still owns the only lock; our failed transaction left no lock.
+	var waiting int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM pg_locks WHERE NOT granted`).Scan(&waiting))
+	require.Zero(t, waiting, "no ungranted locks should remain after the timeout")
+
+	// Release the lock and post the same key; it must now succeed.
+	require.NoError(t, holder.Rollback(context.Background()))
+	_, err = repo.PostTransaction(context.Background(), transferReq("locked", "u1", "u2", 100))
 	require.NoError(t, err)
 
 	b1, err := repo.Balance(context.Background(), uref("u1"))

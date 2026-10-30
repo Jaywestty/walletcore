@@ -72,16 +72,29 @@ func (r *Repository) PostTransaction(ctx context.Context, req PostRequest) (Jour
 	}
 	fingerprint := Fingerprint(req)
 
+	return retryLoop(ctx, r.maxRetries, &r.retries, func(attempt int) (Journal, error) {
+		return r.postOnce(ctx, req, fingerprint)
+	})
+}
+
+// attemptFunc is one posting attempt. attempt is 0-based.
+type attemptFunc func(attempt int) (Journal, error)
+
+// retryLoop runs attempt up to maxRetries+1 times, retrying only errors that
+// retryable reports true for. It counts each retry on the supplied counter and
+// sleeps a jittered backoff that honours ctx. It is a pure control-flow helper
+// so it can be unit tested with an injected attempt function.
+func retryLoop(ctx context.Context, maxRetries int, counter *atomic.Int64, attempt attemptFunc) (Journal, error) {
 	var lastErr error
-	for attempt := 0; attempt <= r.maxRetries; attempt++ {
-		if attempt > 0 {
-			r.retries.Add(1)
-			if err := sleep(ctx, backoff(attempt)); err != nil {
+	for i := 0; i <= maxRetries; i++ {
+		if i > 0 {
+			counter.Add(1)
+			if err := sleep(ctx, backoff(i)); err != nil {
 				return Journal{}, err
 			}
 		}
 
-		j, err := r.postOnce(ctx, req, fingerprint)
+		j, err := attempt(i)
 		if err == nil {
 			return j, nil
 		}
@@ -280,7 +293,10 @@ func (r *Repository) loadReplayDetails(ctx context.Context, tx pgx.Tx, j *Journa
 		b.Currency = b.Account.Currency
 		j.Balances = append(j.Balances, b)
 	}
-	return brows.Err()
+	if err := brows.Err(); err != nil {
+		return fmt.Errorf("load replay balances: %w", MapError(err))
+	}
+	return nil
 }
 
 // lockTimeoutMillis renders the lock timeout as an integer string of
@@ -426,7 +442,7 @@ func (r *Repository) lockBalances(ctx context.Context, tx pgx.Tx, accounts map[s
 		locked[id] = bal
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("lock balances: %w", MapError(err))
 	}
 
 	// Every account must have exactly one locked balance row. A mismatch means
@@ -615,7 +631,10 @@ func (r *Repository) loadJournalLegs(ctx context.Context, tx pgx.Tx, journalID s
 		l.Side = Side(side)
 		legs = append(legs, l)
 	}
-	return legs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("load original legs: %w", MapError(err))
+	}
+	return legs, nil
 }
 
 // Balance returns the cached balance for an account reference. It returns

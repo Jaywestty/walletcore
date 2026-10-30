@@ -1,0 +1,30 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  build-tags:
+    - integration
+    - concurrency
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+    - gofmt
+    - errorlint
+    - bodyclose
+    - noctx
+
+issues:
+  exclude-rules:
+    # Test files exercise error paths and may ignore returned errors on
+    # deliberate failures.
+    - path: _test\.go
+      linters:
+        - errcheck
+        - noctx

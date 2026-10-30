@@ -24,6 +24,10 @@ type Config struct {
 	HTTPReadTimeout  time.Duration
 	HTTPWriteTimeout time.Duration
 	HTTPIdleTimeout  time.Duration
+	// HTTPRequestTimeout bounds the total handler time for one request. It must
+	// exceed the ledger lock timeout so a posting can finish before the handler
+	// is cancelled.
+	HTTPRequestTimeout time.Duration
 
 	// DatabaseURL is the pgx connection string for the primary database.
 	DatabaseURL string
@@ -79,6 +83,7 @@ func load(getenv loader) (*Config, error) {
 		HTTPReadTimeout:     5 * time.Second,
 		HTTPWriteTimeout:    10 * time.Second,
 		HTTPIdleTimeout:     60 * time.Second,
+		HTTPRequestTimeout:  15 * time.Second,
 		ShutdownTimeout:     10 * time.Second,
 	}
 
@@ -116,6 +121,9 @@ func load(getenv loader) (*Config, error) {
 	if cfg.HTTPIdleTimeout, err = durationEnv(getenv, "HTTP_IDLE_TIMEOUT", cfg.HTTPIdleTimeout); err != nil {
 		return nil, err
 	}
+	if cfg.HTTPRequestTimeout, err = durationEnv(getenv, "HTTP_REQUEST_TIMEOUT", cfg.HTTPRequestTimeout); err != nil {
+		return nil, err
+	}
 	if cfg.ShutdownTimeout, err = durationEnv(getenv, "SHUTDOWN_TIMEOUT", cfg.ShutdownTimeout); err != nil {
 		return nil, err
 	}
@@ -138,6 +146,9 @@ func (c *Config) validate() error {
 	}
 	if c.DBMinConns > c.DBMaxConns {
 		problems = append(problems, fmt.Errorf("DB_MIN_CONNS (%d) must not exceed DB_MAX_CONNS (%d)", c.DBMinConns, c.DBMaxConns))
+	}
+	if c.LedgerLockTimeout >= c.HTTPRequestTimeout {
+		problems = append(problems, fmt.Errorf("LEDGER_LOCK_TIMEOUT (%s) must be less than the HTTP request timeout (%s)", c.LedgerLockTimeout, c.HTTPRequestTimeout))
 	}
 	switch c.LogLevel {
 	case "debug", "info", "warn", "error":
