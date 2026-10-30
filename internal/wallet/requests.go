@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Jaywestty/walletcore/internal/ledger"
 )
@@ -83,17 +84,31 @@ func validateCommon(key, actor string) error {
 	if strings.TrimSpace(key) == "" {
 		return fmt.Errorf("%w: idempotency key is required", ErrInvalidRequest)
 	}
-	if strings.TrimSpace(actor) == "" {
-		return fmt.Errorf("%w: actor is required", ErrInvalidRequest)
+	if err := validateLabel("actor", actor); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateLabel enforces a non-empty, at most 128 rune, control-character-free
+// owner or actor reference.
+func validateLabel(field, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("%w: %s is required", ErrInvalidRequest, field)
+	}
+	if utf8.RuneCountInString(value) > 128 {
+		return fmt.Errorf("%w: %s must be at most 128 characters", ErrInvalidRequest, field)
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("%w: %s must not contain control characters", ErrInvalidRequest, field)
+		}
 	}
 	return nil
 }
 
 func validateOwner(owner string) error {
-	if strings.TrimSpace(owner) == "" {
-		return fmt.Errorf("%w: owner is required", ErrInvalidRequest)
-	}
-	return nil
+	return validateLabel("owner", owner)
 }
 
 func validateAmount(amount int64) error {
@@ -190,8 +205,8 @@ func validateSettle(r SettleWithdrawalRequest) error {
 	if err := validateCommon(r.IdempotencyKey, r.Actor); err != nil {
 		return err
 	}
-	if strings.TrimSpace(r.RequestID) == "" {
-		return fmt.Errorf("%w: request id is required", ErrInvalidRequest)
+	if !isUUID(r.RequestID) {
+		return fmt.Errorf("%w: request id must be a uuid", ErrInvalidRequest)
 	}
 	return nil
 }
@@ -200,8 +215,29 @@ func validateReverse(r ReverseRequest) error {
 	if err := validateCommon(r.IdempotencyKey, r.Actor); err != nil {
 		return err
 	}
-	if strings.TrimSpace(r.JournalID) == "" {
-		return fmt.Errorf("%w: journal id is required", ErrInvalidRequest)
+	if !isUUID(r.JournalID) {
+		return fmt.Errorf("%w: journal id must be a uuid", ErrInvalidRequest)
 	}
 	return nil
+}
+
+// isUUID reports whether s is a canonical hyphenated UUID.
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		switch i {
+		case 8, 13, 18, 23:
+			if s[i] != '-' {
+				return false
+			}
+		default:
+			c := s[i]
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
 }

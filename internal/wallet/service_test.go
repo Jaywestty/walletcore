@@ -169,17 +169,17 @@ func requestJournal(id, owner, currency string, amount int64) ledger.Journal {
 
 func TestFinalizeDerivesFromRequest(t *testing.T) {
 	f := newFake()
-	f.journals["req-1"] = requestJournal("req-1", "u1", "EUR", 250)
+	f.journals["11111111-1111-1111-1111-111111111111"] = requestJournal("11111111-1111-1111-1111-111111111111", "u1", "EUR", 250)
 	s := New(f)
 
 	_, err := s.FinalizeWithdrawal(context.Background(), SettleWithdrawalRequest{
-		IdempotencyKey: "fin", Actor: "system", RequestID: "req-1",
+		IdempotencyKey: "fin", Actor: "system", RequestID: "11111111-1111-1111-1111-111111111111",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	req := lastPosted(t, f)
-	if req.SettlesJournalID != "req-1" {
+	if req.SettlesJournalID != "11111111-1111-1111-1111-111111111111" {
 		t.Fatalf("settles = %q", req.SettlesJournalID)
 	}
 	requireLegs(t, req.Legs, []ledger.Leg{
@@ -190,11 +190,11 @@ func TestFinalizeDerivesFromRequest(t *testing.T) {
 
 func TestFailDerivesFromRequest(t *testing.T) {
 	f := newFake()
-	f.journals["req-1"] = requestJournal("req-1", "u1", "EUR", 250)
+	f.journals["11111111-1111-1111-1111-111111111111"] = requestJournal("11111111-1111-1111-1111-111111111111", "u1", "EUR", 250)
 	s := New(f)
 
 	_, err := s.FailWithdrawal(context.Background(), SettleWithdrawalRequest{
-		IdempotencyKey: "fail", Actor: "system", RequestID: "req-1",
+		IdempotencyKey: "fail", Actor: "system", RequestID: "11111111-1111-1111-1111-111111111111",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -208,10 +208,10 @@ func TestFailDerivesFromRequest(t *testing.T) {
 
 func TestSettleNonWithdrawalRejected(t *testing.T) {
 	f := newFake()
-	f.journals["f-1"] = ledger.Journal{ID: "f-1", Kind: ledger.KindFund}
+	f.journals["22222222-2222-2222-2222-222222222222"] = ledger.Journal{ID: "22222222-2222-2222-2222-222222222222", Kind: ledger.KindFund}
 	s := New(f)
 	_, err := s.FinalizeWithdrawal(context.Background(), SettleWithdrawalRequest{
-		IdempotencyKey: "fin", Actor: "system", RequestID: "f-1",
+		IdempotencyKey: "fin", Actor: "system", RequestID: "22222222-2222-2222-2222-222222222222",
 	})
 	if !errors.Is(err, ledger.ErrInvalidJournal) {
 		t.Fatalf("want ErrInvalidJournal, got %v", err)
@@ -220,8 +220,8 @@ func TestSettleNonWithdrawalRejected(t *testing.T) {
 
 func TestReverseBuildsMirror(t *testing.T) {
 	f := newFake()
-	f.journals["fund-1"] = ledger.Journal{
-		ID:   "fund-1",
+	f.journals["33333333-3333-3333-3333-333333333333"] = ledger.Journal{
+		ID:   "33333333-3333-3333-3333-333333333333",
 		Kind: ledger.KindFund,
 		Legs: []ledger.Leg{
 			leg(ledger.AccountRef{Kind: ledger.KindSettlement, OwnerRef: "core", Currency: "USD"}, ledger.Debit, 100),
@@ -230,13 +230,13 @@ func TestReverseBuildsMirror(t *testing.T) {
 	}
 	s := New(f)
 	_, err := s.Reverse(context.Background(), ReverseRequest{
-		IdempotencyKey: "rev", Actor: "system", JournalID: "fund-1",
+		IdempotencyKey: "rev", Actor: "system", JournalID: "33333333-3333-3333-3333-333333333333",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	req := lastPosted(t, f)
-	if req.ReversesJournalID != "fund-1" {
+	if req.ReversesJournalID != "33333333-3333-3333-3333-333333333333" {
 		t.Fatalf("reverses = %q", req.ReversesJournalID)
 	}
 	requireLegs(t, req.Legs, []ledger.Leg{

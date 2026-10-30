@@ -33,6 +33,7 @@ const (
 	sqlstateQueryCanceled       = "57014"
 	sqlstateAdminShutdown       = "57P01"
 	sqlstateConnectionFailure   = "08006"
+	sqlstateInvalidTextRepr     = "22P02"
 	sqlstateUnbalanced          = "LD001"
 	sqlstateCurrency            = "LD002"
 	sqlstateNegative            = "LD003"
@@ -82,6 +83,9 @@ func sentinelFor(pg *pgconn.PgError) error {
 		return ErrDeadlockDetected
 	case sqlstateSerializationFail:
 		return ErrSerializationFailure
+	case sqlstateInvalidTextRepr:
+		// A malformed uuid or similar cast failure.
+		return ErrInvalidJournal
 	case sqlstateFeatureNotSupported:
 		// 0A000 here means a TRUNCATE on a protected table was refused because
 		// of a foreign key. Treat it as an attempt to mutate immutable history.

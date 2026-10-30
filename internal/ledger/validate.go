@@ -40,11 +40,17 @@ func Validate(req PostRequest) error {
 	if isReversal != hasTarget {
 		return fmt.Errorf("%w: reversal kind and reverses_journal_id must agree", ErrInvalidJournal)
 	}
+	if hasTarget && !isUUID(req.ReversesJournalID) {
+		return fmt.Errorf("%w: reverses_journal_id is not a valid uuid", ErrInvalidJournal)
+	}
 
 	// Settlement fields must agree with the kind.
 	settles := strings.TrimSpace(req.SettlesJournalID) != ""
 	if req.Kind.SettlesKind() != settles {
 		return fmt.Errorf("%w: settlement kind and settles_journal_id must agree", ErrInvalidJournal)
+	}
+	if settles && !isUUID(req.SettlesJournalID) {
+		return fmt.Errorf("%w: settles_journal_id is not a valid uuid", ErrInvalidJournal)
 	}
 	if hasTarget && settles {
 		return fmt.Errorf("%w: a journal cannot both reverse and settle", ErrInvalidJournal)
@@ -105,7 +111,29 @@ func Validate(req PostRequest) error {
 		}
 	}
 
-	return nil
+	// The legs must also match the journal kind's expected shape.
+	return ValidateShape(req.Kind, req.Legs)
+}
+
+// isUUID reports whether s is a canonical hyphenated UUID.
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		switch i {
+		case 8, 13, 18, 23:
+			if s[i] != '-' {
+				return false
+			}
+		default:
+			c := s[i]
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // checkedAdd returns a+b and whether the result fits in int64. Both inputs are

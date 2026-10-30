@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Jaywestty/walletcore/internal/ledger"
@@ -83,7 +84,7 @@ func TestValidateChargeFeeAndWithdraw(t *testing.T) {
 }
 
 func TestValidateSettleAndReverse(t *testing.T) {
-	s := SettleWithdrawalRequest{IdempotencyKey: "k", Actor: "a", RequestID: "r"}
+	s := SettleWithdrawalRequest{IdempotencyKey: "k", Actor: "a", RequestID: "11111111-1111-1111-1111-111111111111"}
 	if err := validateSettle(s); err != nil {
 		t.Fatalf("valid settle rejected: %v", err)
 	}
@@ -92,12 +93,49 @@ func TestValidateSettleAndReverse(t *testing.T) {
 		t.Fatalf("missing request id: %v", err)
 	}
 
-	r := ReverseRequest{IdempotencyKey: "k", Actor: "a", JournalID: "j"}
+	r := ReverseRequest{IdempotencyKey: "k", Actor: "a", JournalID: "33333333-3333-3333-3333-333333333333"}
 	if err := validateReverse(r); err != nil {
 		t.Fatalf("valid reverse rejected: %v", err)
 	}
 	r.JournalID = ""
 	if err := validateReverse(r); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("missing journal id: %v", err)
+	}
+}
+
+func TestValidateOwnerAndActorBounds(t *testing.T) {
+	long := strings.Repeat("a", 129)
+	ok128 := strings.Repeat("a", 128)
+
+	base := FundRequest{IdempotencyKey: "k", Actor: "a", Owner: ok128, Amount: 1, Currency: "USD"}
+	if err := validateFund(base); err != nil {
+		t.Fatalf("128-char owner should be valid: %v", err)
+	}
+
+	base.Owner = long
+	if err := validateFund(base); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("129-char owner should be rejected, got %v", err)
+	}
+
+	base.Owner = "u1"
+	base.Actor = long
+	if err := validateFund(base); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("129-char actor should be rejected, got %v", err)
+	}
+
+	base.Actor = "a\x00b"
+	if err := validateFund(base); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("control char in actor should be rejected, got %v", err)
+	}
+}
+
+func TestValidateSettleUUID(t *testing.T) {
+	s := SettleWithdrawalRequest{IdempotencyKey: "k", Actor: "a", RequestID: "not-a-uuid"}
+	if err := validateSettle(s); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("non-uuid request id should be rejected, got %v", err)
+	}
+	r := ReverseRequest{IdempotencyKey: "k", Actor: "a", JournalID: "not-a-uuid"}
+	if err := validateReverse(r); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("non-uuid journal id should be rejected, got %v", err)
 	}
 }

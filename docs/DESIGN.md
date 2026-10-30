@@ -282,3 +282,23 @@ and by a single uniqueness rule, so there is no separate state to drift out of
 sync with the money. The database enforces "settled at most once" even under
 concurrent settlement attempts, because only one insert can satisfy the unique
 index.
+
+### Journal shape validation
+
+Before posting, the engine checks that the legs match the kind's expected
+shape. This runs after the per-currency balance check, so an unbalanced journal
+is reported as unbalanced before its shape is considered. Kinds that depend on
+a target journal get only a structural check here; their exact legs are checked
+against the target inside the transaction.
+
+| Kind | Legs | Notes |
+|---|---|---|
+| fund | Dr settlement:core, Cr user_wallet | Exactly two legs, equal amount and currency. |
+| transfer | Dr user_wallet (amount + fee), Cr user_wallet (amount), optional Cr fees:core (fee) | Two or three legs, one currency, the two wallets differ. |
+| fee | Dr user_wallet, Cr fees:core | Exactly two legs, equal amount. |
+| withdrawal_request | Dr user_wallet:X, Cr holds:X | Exactly two legs, same owner, equal amount. |
+| withdrawal_finalize, withdrawal_fail | exactly two legs | Leg details checked against the request in verifySettlement. |
+| reversal | any | Exactly mirrors the original, checked in verifyReversal. |
+
+Settlement and fee accounts always use owner `core`. A leg with a different
+shape is rejected with `ErrInvalidJournal` before any database work.

@@ -371,3 +371,55 @@ func TestRandomisedWorkload(t *testing.T) {
 
 	testdb.AssertInvariants(t, pool)
 }
+
+func TestReversalBadUUID(t *testing.T) {
+	ctx := context.Background()
+	s, pool := newService(t)
+	_, err := s.Reverse(ctx, wallet.ReverseRequest{IdempotencyKey: "bad", Actor: "system", JournalID: "not-a-uuid"})
+	require.True(t, errors.Is(err, wallet.ErrInvalidRequest),
+		"want ErrInvalidRequest, got %v", err)
+	_ = pool
+}
+
+func TestReplayPrecedenceFinalize(t *testing.T) {
+	ctx := context.Background()
+	s, pool := newService(t)
+	fund(t, s, "u1", 1000)
+	req, err := s.RequestWithdrawal(ctx, wallet.WithdrawRequest{IdempotencyKey: "wr", Actor: "u1", Owner: "u1", Amount: 100, Currency: "USD"})
+	require.NoError(t, err)
+
+	settle := wallet.SettleWithdrawalRequest{IdempotencyKey: "fin", Actor: "system", RequestID: req.ID}
+	first, err := s.FinalizeWithdrawal(ctx, settle)
+	require.NoError(t, err)
+
+	// Same key and payload replays, not ErrWithdrawalAlreadySettled.
+	replay, err := s.FinalizeWithdrawal(ctx, settle)
+	require.NoError(t, err, "replay must succeed with the original result")
+	require.True(t, replay.Replayed)
+	require.Equal(t, first.ID, replay.ID)
+
+	// A different key is a real second settlement.
+	_, err = s.FinalizeWithdrawal(ctx, wallet.SettleWithdrawalRequest{IdempotencyKey: "fin2", Actor: "system", RequestID: req.ID})
+	require.True(t, errors.Is(err, ledger.ErrWithdrawalAlreadySettled), "want ErrWithdrawalAlreadySettled, got %v", err)
+	testdb.AssertInvariants(t, pool)
+}
+
+func TestReplayPrecedenceReversal(t *testing.T) {
+	ctx := context.Background()
+	s, pool := newService(t)
+	fundJ, err := s.Fund(ctx, wallet.FundRequest{IdempotencyKey: "fund", Actor: "system", Owner: "u1", Amount: 100, Currency: "USD"})
+	require.NoError(t, err)
+
+	rev := wallet.ReverseRequest{IdempotencyKey: "rev", Actor: "system", JournalID: fundJ.ID}
+	first, err := s.Reverse(ctx, rev)
+	require.NoError(t, err)
+
+	replay, err := s.Reverse(ctx, rev)
+	require.NoError(t, err, "reversal replay must succeed")
+	require.True(t, replay.Replayed)
+	require.Equal(t, first.ID, replay.ID)
+
+	_, err = s.Reverse(ctx, wallet.ReverseRequest{IdempotencyKey: "rev2", Actor: "system", JournalID: fundJ.ID})
+	require.True(t, errors.Is(err, ledger.ErrAlreadyReversed), "want ErrAlreadyReversed, got %v", err)
+	testdb.AssertInvariants(t, pool)
+}
