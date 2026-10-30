@@ -26,6 +26,7 @@ type canonicalRequest struct {
 	Actor             string         `json:"actor"`
 	Reason            string         `json:"reason"`
 	ReversesJournalID string         `json:"reverses_journal_id"`
+	SettlesJournalID  string         `json:"settles_journal_id"`
 	IdempotencyKey    string         `json:"idempotency_key"`
 	Legs              []canonicalLeg `json:"legs"`
 }
@@ -57,6 +58,7 @@ func Fingerprint(req PostRequest) string {
 		Actor:             req.Actor,
 		Reason:            req.Reason,
 		ReversesJournalID: req.ReversesJournalID,
+		SettlesJournalID:  req.SettlesJournalID,
 		IdempotencyKey:    req.IdempotencyKey,
 		Legs:              legs,
 	}
