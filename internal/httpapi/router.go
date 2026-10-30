@@ -30,6 +30,8 @@ type Options struct {
 	// TrustProxyHeaders enables using X-Forwarded-For and similar headers to
 	// determine the client IP. Only enable behind a trusted reverse proxy.
 	TrustProxyHeaders bool
+	// RequestTimeout bounds the total handler time for one request.
+	RequestTimeout time.Duration
 }
 
 // NewRouter builds the application router. Routes live here so main only wires
@@ -39,7 +41,7 @@ func NewRouter(opts Options) http.Handler {
 		opts.ReadyTimeout = 2 * time.Second
 	}
 
-	r := newRouter(opts.TrustProxyHeaders)
+	r := newRouter(opts.TrustProxyHeaders, opts.RequestTimeout)
 	if opts.Logger != nil {
 		r.Use(LoggingMiddleware(opts.Logger))
 	}

@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -27,6 +28,13 @@ func classifyCommitError(err error) error {
 	var pg *pgconn.PgError
 	if errors.As(err, &pg) && isDefiniteRejection(pg.Code) {
 		return MapError(err)
+	}
+
+	// pgx returns ErrTxCommitRollback when the server aborted the transaction
+	// before commit, for example on a deferred constraint failure. That is a
+	// definite failure: nothing was committed.
+	if errors.Is(err, pgx.ErrTxCommitRollback) {
+		return fmt.Errorf("commit rejected: %w", err)
 	}
 
 	// Context cancellation or deadline during commit is inherently ambiguous.

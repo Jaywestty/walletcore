@@ -54,6 +54,7 @@ func run() error {
 		ReadinessPinger:   pool,
 		ReadyTimeout:      2 * time.Second,
 		TrustProxyHeaders: cfg.TrustProxyHeaders,
+		RequestTimeout:    cfg.HTTPRequestTimeout,
 	})
 
 	srv := &http.Server{

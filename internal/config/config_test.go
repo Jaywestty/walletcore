@@ -121,6 +121,11 @@ func TestLoadValidationErrors(t *testing.T) {
 			wantSub: "DB_MAX_CONN_LIFETIME must be a duration",
 		},
 		{
+			name:    "lock timeout not below request timeout",
+			env:     map[string]string{"DATABASE_URL": "postgres://x", "LEDGER_LOCK_TIMEOUT": "20s", "HTTP_REQUEST_TIMEOUT": "10s"},
+			wantSub: "LEDGER_LOCK_TIMEOUT",
+		},
+		{
 			name:    "negative duration",
 			env:     map[string]string{"DATABASE_URL": "postgres://x", "SHUTDOWN_TIMEOUT": "-5s"},
 			wantSub: "SHUTDOWN_TIMEOUT must be positive",
@@ -136,5 +141,15 @@ func TestLoadValidationErrors(t *testing.T) {
 				t.Fatalf("error %q does not contain %q", err.Error(), tc.wantSub)
 			}
 		})
+	}
+}
+
+func TestLedgerTimeoutBelowRequestTimeout(t *testing.T) {
+	cfg, err := load(envMap(map[string]string{"DATABASE_URL": "postgres://x"}))
+	if err != nil {
+		t.Fatalf("defaults should be valid: %v", err)
+	}
+	if cfg.LedgerLockTimeout >= cfg.HTTPRequestTimeout {
+		t.Fatalf("lock timeout %s must be below request timeout %s", cfg.LedgerLockTimeout, cfg.HTTPRequestTimeout)
 	}
 }
