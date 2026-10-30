@@ -41,6 +41,15 @@ func Validate(req PostRequest) error {
 		return fmt.Errorf("%w: reversal kind and reverses_journal_id must agree", ErrInvalidJournal)
 	}
 
+	// Settlement fields must agree with the kind.
+	settles := strings.TrimSpace(req.SettlesJournalID) != ""
+	if req.Kind.SettlesKind() != settles {
+		return fmt.Errorf("%w: settlement kind and settles_journal_id must agree", ErrInvalidJournal)
+	}
+	if hasTarget && settles {
+		return fmt.Errorf("%w: a journal cannot both reverse and settle", ErrInvalidJournal)
+	}
+
 	if len(req.Legs) < 2 {
 		return fmt.Errorf("%w: a journal needs at least two legs", ErrUnbalancedJournal)
 	}
