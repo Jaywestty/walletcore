@@ -19,6 +19,7 @@ import (
 type Store interface {
 	PostTransaction(ctx context.Context, req PostRequest) (Journal, error)
 	Balance(ctx context.Context, ref AccountRef) (int64, error)
+	GetJournal(ctx context.Context, id string) (Journal, error)
 }
 
 // Repository is the pgx implementation of Store. It owns one shared pool and
@@ -140,10 +141,16 @@ func (r *Repository) postOnce(ctx context.Context, req PostRequest, fingerprint 
 		return existing, nil
 	}
 
-	// Step 2: for a reversal, lock and verify the original before touching
-	// balances.
+	// Step 2: lock and verify the referenced journal. A journal resolves
+	// either as a reversal or as a withdrawal settlement, never both, so no
+	// new lock cycle can form.
 	if req.Kind == KindReversal {
 		if err := r.verifyReversal(ctx, tx, req); err != nil {
+			return Journal{}, err
+		}
+	}
+	if req.Kind.SettlesKind() {
+		if err := r.verifySettlement(ctx, tx, req); err != nil {
 			return Journal{}, err
 		}
 	}
@@ -195,9 +202,11 @@ func (r *Repository) postOnce(ctx context.Context, req PostRequest, fingerprint 
 		Reason:            req.Reason,
 		Metadata:          nonNilMetadata(req.Metadata),
 		ReversesJournalID: req.ReversesJournalID,
+		SettlesJournalID:  req.SettlesJournalID,
 		OccurredAt:        req.OccurredAt,
 		Entries:           entries,
 		Balances:          balances,
+		Legs:              req.Legs,
 		Replayed:          false,
 	}, nil
 }
@@ -212,7 +221,8 @@ func (r *Repository) checkIdempotency(ctx context.Context, tx pgx.Tx, req PostRe
 
 	const q = `
 		SELECT id::text, kind, fingerprint, actor, reason, metadata,
-		       COALESCE(reverses_journal_id::text, ''), occurred_at, posted_at
+		       COALESCE(reverses_journal_id::text, ''), COALESCE(settles_journal_id::text, ''),
+		       occurred_at, posted_at
 		FROM ledger_journals
 		WHERE idempotency_key = $1`
 	var (
@@ -222,7 +232,7 @@ func (r *Repository) checkIdempotency(ctx context.Context, tx pgx.Tx, req PostRe
 	)
 	err := tx.QueryRow(ctx, q, req.IdempotencyKey).Scan(
 		&j.ID, &kind, &j.Fingerprint, &j.Actor, &j.Reason, &metaJS,
-		&j.ReversesJournalID, &j.OccurredAt, &j.PostedAt,
+		&j.ReversesJournalID, &j.SettlesJournalID, &j.OccurredAt, &j.PostedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, Journal{}, nil
@@ -248,8 +258,10 @@ func (r *Repository) checkIdempotency(ctx context.Context, tx pgx.Tx, req PostRe
 // loadReplayDetails fills entries and current balances for a replayed journal.
 func (r *Repository) loadReplayDetails(ctx context.Context, tx pgx.Tx, j *Journal) error {
 	const entryQ = `
-		SELECT e.id::text, e.journal_id::text, e.account_id::text, e.side, e.amount, e.currency, e.entry_seq
+		SELECT e.id::text, e.journal_id::text, e.account_id::text, e.side, e.amount, e.currency, e.entry_seq,
+		       a.kind, a.owner_ref, a.currency
 		FROM ledger_entries e
+		JOIN ledger_accounts a ON a.id = e.account_id
 		WHERE e.journal_id = $1
 		ORDER BY e.entry_seq`
 	rows, err := tx.Query(ctx, entryQ, j.ID)
@@ -257,14 +269,25 @@ func (r *Repository) loadReplayDetails(ctx context.Context, tx pgx.Tx, j *Journa
 		return fmt.Errorf("load replay entries: %w", MapError(err))
 	}
 	for rows.Next() {
-		var e Entry
-		var side string
-		if err := rows.Scan(&e.ID, &e.JournalID, &e.AccountID, &side, &e.Amount, &e.Currency, &e.EntrySeq); err != nil {
+		var (
+			e        Entry
+			side     string
+			accKind  string
+			accOwner string
+			accCcy   string
+		)
+		if err := rows.Scan(&e.ID, &e.JournalID, &e.AccountID, &side, &e.Amount, &e.Currency, &e.EntrySeq,
+			&accKind, &accOwner, &accCcy); err != nil {
 			rows.Close()
 			return err
 		}
 		e.Side = Side(side)
 		j.Entries = append(j.Entries, e)
+		j.Legs = append(j.Legs, Leg{
+			Account: AccountRef{Kind: AccountKind(accKind), OwnerRef: accOwner, Currency: accCcy},
+			Side:    Side(side),
+			Amount:  e.Amount,
+		})
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -526,16 +549,20 @@ func (r *Repository) insertJournal(ctx context.Context, tx pgx.Tx, req PostReque
 	if req.ReversesJournalID != "" {
 		reverses = &req.ReversesJournalID
 	}
+	var settles *string
+	if req.SettlesJournalID != "" {
+		settles = &req.SettlesJournalID
+	}
 
 	const insert = `
 		INSERT INTO ledger_journals
-			(kind, idempotency_key, fingerprint, actor, reason, metadata, reverses_journal_id, occurred_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			(kind, idempotency_key, fingerprint, actor, reason, metadata, reverses_journal_id, settles_journal_id, occurred_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING id::text`
 	var id string
 	err = tx.QueryRow(ctx, insert,
 		string(req.Kind), req.IdempotencyKey, fingerprint, req.Actor, req.Reason,
-		metaJSON, reverses, req.OccurredAt,
+		metaJSON, reverses, settles, req.OccurredAt,
 	).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("insert journal: %w", MapError(err))
@@ -567,6 +594,56 @@ func (r *Repository) insertEntries(ctx context.Context, tx pgx.Tx, journalID str
 	return out, nil
 }
 
+// verifySettlement locks the withdrawal_request a settlement targets, checks it
+// is a request, checks it is not already settled, and validates the settlement
+// legs against the request.
+func (r *Repository) verifySettlement(ctx context.Context, tx pgx.Tx, req PostRequest) error {
+	const lockTarget = `SELECT kind FROM ledger_journals WHERE id = $1 FOR UPDATE`
+	var targetKind string
+	if err := tx.QueryRow(ctx, lockTarget, req.SettlesJournalID).Scan(&targetKind); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: settlement target %s", ErrInvalidJournal, req.SettlesJournalID)
+		}
+		return fmt.Errorf("lock settlement target: %w", MapError(err))
+	}
+	if JournalKind(targetKind) != KindWithdrawalRequest {
+		return fmt.Errorf("%w: a %s journal is not a withdrawal request", ErrInvalidJournal, targetKind)
+	}
+
+	// Reject an already-settled request before touching balances, so the
+	// caller sees ErrWithdrawalAlreadySettled rather than a balance error. The
+	// unique index on settles_journal_id remains the hard guarantee.
+	var settled bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM ledger_journals WHERE settles_journal_id = $1)`,
+		req.SettlesJournalID,
+	).Scan(&settled); err != nil {
+		return fmt.Errorf("check settlement: %w", MapError(err))
+	}
+	if settled {
+		return fmt.Errorf("%w: %s", ErrWithdrawalAlreadySettled, req.SettlesJournalID)
+	}
+
+	requestLegs, err := r.loadJournalLegs(ctx, tx, req.SettlesJournalID)
+	if err != nil {
+		return err
+	}
+
+	switch req.Kind {
+	case KindWithdrawalFail:
+		if !MirrorMatches(requestLegs, req.Legs) {
+			return fmt.Errorf("%w: withdrawal_fail legs do not mirror the request", ErrInvalidJournal)
+		}
+	case KindWithdrawalFinalize:
+		if !FinalizeMatches(requestLegs, req.Legs) {
+			return fmt.Errorf("%w: withdrawal_finalize legs do not match the request", ErrInvalidJournal)
+		}
+	default:
+		return fmt.Errorf("%w: %s does not settle a request", ErrInvalidJournal, req.Kind)
+	}
+	return nil
+}
+
 // verifyReversal locks the original journal, rejects reversing a reversal, and
 // checks that the request legs mirror the original with opposite sides.
 func (r *Repository) verifyReversal(ctx context.Context, tx pgx.Tx, req PostRequest) error {
@@ -580,6 +657,9 @@ func (r *Repository) verifyReversal(ctx context.Context, tx pgx.Tx, req PostRequ
 	}
 	if JournalKind(originalKind) == KindReversal {
 		return fmt.Errorf("%w: cannot reverse a reversal", ErrInvalidJournal)
+	}
+	if !JournalKind(originalKind).ReversibleKind() {
+		return fmt.Errorf("%w: a %s journal is resolved by finalize or fail, not reversal", ErrInvalidJournal, originalKind)
 	}
 
 	// Reject a journal that already has a reversal before touching balances,
@@ -655,6 +735,73 @@ func (r *Repository) Balance(ctx context.Context, ref AccountRef) (int64, error)
 		return 0, fmt.Errorf("read balance: %w", MapError(err))
 	}
 	return bal, nil
+}
+
+// GetJournal returns a journal header with its entries ordered by entry_seq and
+// the legs expressed as account references. It returns ErrJournalNotFound when
+// no journal has the given id.
+func (r *Repository) GetJournal(ctx context.Context, id string) (Journal, error) {
+	const q = `
+		SELECT j.id::text, j.kind, j.idempotency_key, j.fingerprint, j.actor, j.reason,
+		       j.metadata, COALESCE(j.reverses_journal_id::text, ''),
+		       COALESCE(j.settles_journal_id::text, ''), j.occurred_at, j.posted_at
+		FROM ledger_journals j
+		WHERE j.id = $1`
+	var (
+		j      Journal
+		kind   string
+		metaJS []byte
+	)
+	err := r.pool.QueryRow(ctx, q, id).Scan(
+		&j.ID, &kind, &j.IdempotencyKey, &j.Fingerprint, &j.Actor, &j.Reason,
+		&metaJS, &j.ReversesJournalID, &j.SettlesJournalID, &j.OccurredAt, &j.PostedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Journal{}, fmt.Errorf("%w: %s", ErrJournalNotFound, id)
+		}
+		return Journal{}, fmt.Errorf("read journal: %w", MapError(err))
+	}
+	j.Kind = JournalKind(kind)
+	j.Metadata = decodeMetadata(metaJS)
+
+	const entriesQ = `
+		SELECT e.id::text, e.account_id::text, e.side, e.amount, e.currency, e.entry_seq,
+		       a.kind, a.owner_ref, a.currency
+		FROM ledger_entries e
+		JOIN ledger_accounts a ON a.id = e.account_id
+		WHERE e.journal_id = $1
+		ORDER BY e.entry_seq`
+	rows, err := r.pool.Query(ctx, entriesQ, id)
+	if err != nil {
+		return Journal{}, fmt.Errorf("read entries: %w", MapError(err))
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			e        Entry
+			side     string
+			accKind  string
+			accOwner string
+			accCcy   string
+		)
+		if err := rows.Scan(&e.ID, &e.AccountID, &side, &e.Amount, &e.Currency, &e.EntrySeq,
+			&accKind, &accOwner, &accCcy); err != nil {
+			return Journal{}, fmt.Errorf("scan entry: %w", err)
+		}
+		e.JournalID = id
+		e.Side = Side(side)
+		j.Entries = append(j.Entries, e)
+		j.Legs = append(j.Legs, Leg{
+			Account: AccountRef{Kind: AccountKind(accKind), OwnerRef: accOwner, Currency: accCcy},
+			Side:    Side(side),
+			Amount:  e.Amount,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return Journal{}, fmt.Errorf("read entries: %w", MapError(err))
+	}
+	return j, nil
 }
 
 // refKey renders an account reference as a map key.
