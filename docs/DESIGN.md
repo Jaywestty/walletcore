@@ -143,15 +143,21 @@ silent wrap. A per-currency sum or a balance that would overflow returns
 Every posting acquires locks in one fixed order, with no exceptions:
 
 1. A transaction-scoped advisory lock on the idempotency key.
-2. For a reversal, the original journal row with `FOR UPDATE`.
+2. The referenced journal row with `FOR UPDATE`: the original for a reversal, or
+   the withdrawal request for a settlement.
 3. Accounts, resolved in sorted `refKey` order.
 4. Balance rows with `FOR UPDATE`, ordered by account id ascending.
+
+Step 2 covers one referenced journal, whether the posting reverses it or settles
+it. A journal is either reversed or settled, never both, and a settlement
+targets a `withdrawal_request`, which is never reversed, so the two cases never
+touch the same row in one posting and add no new lock edges.
 
 Because every path requests these resources in the same total order, a wait-for
 cycle is impossible: transaction A can only wait on a resource that transaction
 B took, and B took it only at a step earlier than or equal to A's current step
 in the same order, so a cycle back to A cannot close. This is the same argument
-as locking accounts in id order, extended to the key lock and the original
+as locking accounts in id order, extended to the key lock and the referenced
 journal.
 
 ### Idempotency
@@ -222,3 +228,57 @@ and only reports state, a concurrent posting may change those balances during
 the read. The values returned are therefore a recent, not a frozen, snapshot.
 Callers that need a strictly consistent read of balances should query them
 after their own write, not rely on the balances embedded in a replay result.
+
+## Wallet operations
+
+The wallet service composes balanced journals over the ledger core. It never
+writes balances; it only builds legs and calls `PostTransaction`. Every
+operation takes an idempotency key, an actor and the owner references, and
+posts one journal.
+
+| Operation | Journal kind | Legs | Failure modes |
+|---|---|---|---|
+| Fund | fund | Dr settlement:core, Cr user_wallet:owner | invalid request, invalid amount |
+| Transfer | transfer | Dr user_wallet:from (amount + fee), Cr user_wallet:to (amount), Cr fees:core (fee, only when fee > 0) | insufficient funds, self transfer, invalid amount |
+| Charge fee | fee | Dr user_wallet:owner, Cr fees:core | insufficient funds, invalid amount |
+| Request withdrawal | withdrawal_request | Dr user_wallet:owner, Cr holds:owner | insufficient funds |
+| Finalize withdrawal | withdrawal_finalize | Dr holds:owner, Cr settlement:core, settles_journal_id set | already settled, target not a request |
+| Fail withdrawal | withdrawal_fail | Dr holds:owner, Cr user_wallet:owner, settles_journal_id set | already settled, target not a request |
+| Reverse | reversal | mirror of the original with opposite sides, reverses_journal_id set | not reversible, already reversed, insufficient funds |
+
+The settlement and fee accounts use the fixed owner reference `core`.
+
+### Withdrawal state machine
+
+A withdrawal is requested, then resolved exactly once:
+
+1. Request. `RequestWithdrawal` moves the amount from the user's wallet into
+   their holds account. The journal is a `withdrawal_request`.
+2. Settlement. Either `FinalizeWithdrawal` (holds to settlement) or
+   `FailWithdrawal` (holds back to the wallet) resolves it. The settlement
+   journal records the request in `settles_journal_id`.
+
+A request can be settled at most once, enforced by the partial unique index
+`ledger_journals_settles_uniq`. A second finalize or fail, in any combination,
+fails with `ErrWithdrawalAlreadySettled`. The state is derived from which
+settlement journal exists, never from a mutable status column.
+
+### Reversal rules
+
+Reversal posts a compensating journal and never edits history. Only `fund`,
+`transfer` and `fee` journals may be reversed. Withdrawal journals
+(`withdrawal_request`, `withdrawal_finalize`, `withdrawal_fail`) are resolved by
+finalize or fail and never reversed, so reversing one returns
+`ErrInvalidJournal`. A journal is reversed at most once, enforced by the
+partial unique index on `reverses_journal_id`; a second attempt returns
+`ErrAlreadyReversed`. Reversing a reversal is rejected with `ErrInvalidJournal`.
+
+### Why the state machine is journals plus a unique index
+
+Expressing the withdrawal lifecycle as immutable journals plus a unique index,
+rather than a mutable `status` column, keeps the audit trail authoritative. The
+allowed transitions are encoded by which journal kinds may reference a request
+and by a single uniqueness rule, so there is no separate state to drift out of
+sync with the money. The database enforces "settled at most once" even under
+concurrent settlement attempts, because only one insert can satisfy the unique
+index.
