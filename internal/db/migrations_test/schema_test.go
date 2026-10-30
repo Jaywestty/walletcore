@@ -42,6 +42,8 @@ const (
 	conJournalKind        = "ledger_journals_kind_check"
 	conAccountUniq        = "ledger_accounts_kind_owner_currency_uniq"
 	conReversesUniq       = "ledger_journals_reverses_uniq"
+	conSettlementPairing  = "ledger_journals_settlement_pairing_check"
+	conSettlesUniq        = "ledger_journals_settles_uniq"
 )
 
 // pgErr extracts the SQLSTATE and constraint name from a PostgreSQL error.
@@ -527,4 +529,91 @@ func TestMigrateDownThenUp(t *testing.T) {
 	)`).Scan(&exists)
 	require.NoError(t, err)
 	require.True(t, exists, "ledger_accounts should exist after migrating up again")
+}
+
+// postSettling inserts a settlement journal (with settles_journal_id) and its
+// legs in one transaction.
+func postSettling(t *testing.T, db *sql.DB, kind, key, settles string, legs ...leg) error {
+	t.Helper()
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	var journal string
+	err = tx.QueryRow(
+		`INSERT INTO ledger_journals (kind, idempotency_key, fingerprint, actor, reason, occurred_at, settles_journal_id)
+		 VALUES ($1, $2, $3, 'test', 'test', now(), $4) RETURNING id`,
+		kind, key, "fp-"+key, settles,
+	).Scan(&journal)
+	if err != nil {
+		return err
+	}
+	for _, l := range legs {
+		if err := insertEntry(tx, journal, l.account, l.side, l.amount, l.currency); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func TestSettlementPairing(t *testing.T) {
+	db, _ := newDB(t)
+	settle := createAccount(t, db, "settlement", "core", "USD")
+	user := createAccount(t, db, "user_wallet", "u1", "USD")
+	holds := createAccount(t, db, "holds", "u1", "USD")
+
+	// A committed withdrawal_request to settle against.
+	request, err := postBalanced(t, db, "withdrawal_request", "req-1",
+		leg{user, "Dr", 100, "USD"},
+		leg{holds, "Cr", 100, "USD"},
+	)
+	require.NoError(t, err)
+
+	t.Run("finalize without target rejected", func(t *testing.T) {
+		// Insert the journal directly with no settles_journal_id inside a tx.
+		tx, err := db.Begin()
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback() }()
+		_, err = tx.Exec(
+			`INSERT INTO ledger_journals (kind, idempotency_key, fingerprint, actor, reason, occurred_at)
+			 VALUES ('withdrawal_finalize', 'fin-no-target', 'fp', 'test', 'test', now())`)
+		pg := pgErr(t, err)
+		require.Equal(t, sqlstateCheckViolation, pg.Code)
+		require.Equal(t, conSettlementPairing, pg.ConstraintName)
+	})
+
+	t.Run("fail without target rejected", func(t *testing.T) {
+		tx, err := db.Begin()
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback() }()
+		_, err = tx.Exec(
+			`INSERT INTO ledger_journals (kind, idempotency_key, fingerprint, actor, reason, occurred_at)
+			 VALUES ('withdrawal_fail', 'fail-no-target', 'fp', 'test', 'test', now())`)
+		pg := pgErr(t, err)
+		require.Equal(t, sqlstateCheckViolation, pg.Code)
+		require.Equal(t, conSettlementPairing, pg.ConstraintName)
+	})
+
+	t.Run("non-settlement kind with target rejected", func(t *testing.T) {
+		err := postSettling(t, db, "fund", "fund-target", request,
+			leg{settle, "Dr", 100, "USD"},
+			leg{user, "Cr", 100, "USD"},
+		)
+		pg := pgErr(t, err)
+		require.Equal(t, sqlstateCheckViolation, pg.Code)
+		require.Equal(t, conSettlementPairing, pg.ConstraintName)
+	})
+
+	t.Run("second settlement rejected", func(t *testing.T) {
+		require.NoError(t, postSettling(t, db, "withdrawal_finalize", "fin-1", request,
+			leg{holds, "Dr", 100, "USD"},
+			leg{settle, "Cr", 100, "USD"},
+		))
+		err := postSettling(t, db, "withdrawal_fail", "fail-1", request,
+			leg{holds, "Dr", 100, "USD"},
+			leg{user, "Cr", 100, "USD"},
+		)
+		pg := pgErr(t, err)
+		require.Equal(t, sqlstateUniqueViolation, pg.Code)
+		require.Equal(t, conSettlesUniq, pg.ConstraintName)
+	})
 }

@@ -110,10 +110,14 @@ type Journal struct {
 	Reason            string
 	Metadata          map[string]string
 	ReversesJournalID string
+	SettlesJournalID  string
 	OccurredAt        time.Time
 	PostedAt          time.Time
 	Entries           []Entry
 	Balances          []Balance
+	// Legs expresses the journal's entries as account references, resolved from
+	// the stored accounts. Populated by GetJournal and by replays.
+	Legs []Leg
 
 	// Replayed is true when this result came from an existing journal that was
 	// returned for an idempotent retry rather than posted now. Balances on a
@@ -154,5 +158,24 @@ type PostRequest struct {
 	Metadata          map[string]string
 	OccurredAt        time.Time
 	ReversesJournalID string
-	Legs              []Leg
+	// SettlesJournalID links a withdrawal_finalize or withdrawal_fail journal
+	// to the withdrawal_request it resolves. Empty for every other kind.
+	SettlesJournalID string
+	Legs             []Leg
+}
+
+// SettlesKind reports whether a journal kind resolves a withdrawal request.
+func (k JournalKind) SettlesKind() bool {
+	return k == KindWithdrawalFinalize || k == KindWithdrawalFail
+}
+
+// ReversibleKind reports whether a journal kind may be reversed. Withdrawal
+// journals are resolved by finalize or fail, never reversed.
+func (k JournalKind) ReversibleKind() bool {
+	switch k {
+	case KindFund, KindTransfer, KindFee:
+		return true
+	default:
+		return false
+	}
 }

@@ -32,6 +32,13 @@ var (
 	// Mapped from constraint ledger_journals_reverses_uniq.
 	ErrAlreadyReversed = errors.New("ledger: journal already reversed")
 
+	// ErrWithdrawalAlreadySettled means the withdrawal request already has a
+	// finalize or fail journal. Mapped from ledger_journals_settles_uniq.
+	ErrWithdrawalAlreadySettled = errors.New("ledger: withdrawal already settled")
+
+	// ErrJournalNotFound means no journal exists for the id.
+	ErrJournalNotFound = errors.New("ledger: journal not found")
+
 	// ErrInvalidAmount means an amount is not strictly positive.
 	ErrInvalidAmount = errors.New("ledger: invalid amount")
 

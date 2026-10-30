@@ -48,6 +48,14 @@ func TestValidate(t *testing.T) {
 		{"bad account kind", func(r *PostRequest) { r.Legs[0].Account.Kind = "nope" }, ErrInvalidJournal},
 		{"reversal without target", func(r *PostRequest) { r.Kind = KindReversal }, ErrInvalidJournal},
 		{"non-reversal with target", func(r *PostRequest) { r.ReversesJournalID = "j" }, ErrInvalidJournal},
+		{"finalize without target", func(r *PostRequest) { r.Kind = KindWithdrawalFinalize }, ErrInvalidJournal},
+		{"fail without target", func(r *PostRequest) { r.Kind = KindWithdrawalFail }, ErrInvalidJournal},
+		{"fund with settle target", func(r *PostRequest) { r.SettlesJournalID = "j" }, ErrInvalidJournal},
+		{"both reverse and settle", func(r *PostRequest) {
+			r.Kind = KindReversal
+			r.ReversesJournalID = "a"
+			r.SettlesJournalID = "b"
+		}, ErrInvalidJournal},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
