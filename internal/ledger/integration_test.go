@@ -310,3 +310,20 @@ func countRows(t *testing.T, pool *pgxpool.Pool, table string) int {
 	require.NoError(t, pool.QueryRow(context.Background(), `SELECT count(*) FROM `+table).Scan(&n))
 	return n
 }
+
+func TestReversalNonUUIDRejected(t *testing.T) {
+	ctx := context.Background()
+	repo := newRepo(t)
+	_, err := repo.PostTransaction(ctx, ledger.PostRequest{
+		IdempotencyKey:    "rev-bad",
+		Kind:              ledger.KindReversal,
+		Actor:             "system",
+		Reason:            "reversal",
+		ReversesJournalID: "not-a-uuid",
+		Legs: []ledger.Leg{
+			{Account: ref(ledger.KindSettlement, "core", "USD"), Side: ledger.Credit, Amount: 100},
+			{Account: ref(ledger.KindUserWallet, "u1", "USD"), Side: ledger.Debit, Amount: 100},
+		},
+	})
+	require.True(t, errors.Is(err, ledger.ErrInvalidJournal), "want ErrInvalidJournal, got %v", err)
+}

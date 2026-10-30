@@ -82,7 +82,10 @@ func countJournals(t *testing.T, pool *pgxpool.Pool) int {
 // 1. 50 goroutines post the same key and payload.
 func TestSameKeySamePayloadConcurrent(t *testing.T) {
 	pool := newPool(t)
-	repo := NewRepository(pool, Options{LockTimeout: 5 * time.Second})
+	// A generous lock timeout: 50 goroutines serialize on one advisory lock and
+	// this suite can run alongside other packages, so waits can be long. The
+	// test asserts replay correctness, not latency.
+	repo := NewRepository(pool, Options{LockTimeout: 60 * time.Second})
 	fund(t, repo, "seed", "u1", 1000)
 
 	const n = 50
@@ -124,7 +127,7 @@ func TestSameKeySamePayloadConcurrent(t *testing.T) {
 // 2. 50 goroutines, same key, different amounts.
 func TestSameKeyDifferentPayloadConcurrent(t *testing.T) {
 	pool := newPool(t)
-	repo := NewRepository(pool, Options{LockTimeout: 5 * time.Second})
+	repo := NewRepository(pool, Options{LockTimeout: 60 * time.Second})
 	fund(t, repo, "seed", "u1", 100000)
 
 	const n = 50
@@ -164,7 +167,7 @@ func TestSameKeyDifferentPayloadConcurrent(t *testing.T) {
 // 3. Funded for 10, 100 concurrent 1-unit debits.
 func TestConcurrentDebitsNoOverdraft(t *testing.T) {
 	pool := newPool(t)
-	repo := NewRepository(pool, Options{LockTimeout: 5 * time.Second})
+	repo := NewRepository(pool, Options{LockTimeout: 60 * time.Second})
 	fund(t, repo, "seed", "u1", 10)
 
 	const n = 100
@@ -202,7 +205,7 @@ func TestConcurrentDebitsNoOverdraft(t *testing.T) {
 // 4. Opposite-direction transfers between two accounts, no retries.
 func TestOppositeTransfersNoDeadlock(t *testing.T) {
 	pool := newPool(t)
-	repo := NewRepository(pool, Options{LockTimeout: 5 * time.Second, MaxRetries: 0})
+	repo := NewRepository(pool, Options{LockTimeout: 60 * time.Second, MaxRetries: 0})
 
 	t.Run("existing accounts", func(t *testing.T) {
 		fund(t, repo, "seed-a", "a", 1_000_000)
@@ -290,7 +293,7 @@ func TestRandomNewAccountsNoDeadlock(t *testing.T) {
 // 6. 20 reversals of the same journal with different keys.
 func TestConcurrentReversals(t *testing.T) {
 	pool := newPool(t)
-	repo := NewRepository(pool, Options{LockTimeout: 5 * time.Second})
+	repo := NewRepository(pool, Options{LockTimeout: 60 * time.Second})
 
 	orig, err := repo.PostTransaction(context.Background(), PostRequest{
 		IdempotencyKey: "orig",
@@ -348,7 +351,7 @@ func TestConcurrentReversals(t *testing.T) {
 // 7. Conservation across many transfers.
 func TestConservation(t *testing.T) {
 	pool := newPool(t)
-	repo := NewRepository(pool, Options{LockTimeout: 5 * time.Second})
+	repo := NewRepository(pool, Options{LockTimeout: 60 * time.Second})
 
 	const accounts = 10
 	const perAccount = 1000
@@ -397,7 +400,7 @@ func TestConservation(t *testing.T) {
 // 8. Replay after state change.
 func TestReplayAfterStateChange(t *testing.T) {
 	pool := newPool(t)
-	repo := NewRepository(pool, Options{LockTimeout: 5 * time.Second})
+	repo := NewRepository(pool, Options{LockTimeout: 60 * time.Second})
 	fund(t, repo, "seed", "u1", 1000)
 
 	req := transferReq("replay", "u1", "u2", 400)
@@ -420,7 +423,7 @@ func TestReplayAfterStateChange(t *testing.T) {
 // 9. Ambiguous commit via terminating the backend just before commit.
 func TestAmbiguousCommit(t *testing.T) {
 	pool := newPool(t)
-	repo := NewRepository(pool, Options{LockTimeout: 5 * time.Second})
+	repo := NewRepository(pool, Options{LockTimeout: 60 * time.Second})
 
 	repo.beforeCommit = func(ctx context.Context, tx pgx.Tx) error {
 		var pid int

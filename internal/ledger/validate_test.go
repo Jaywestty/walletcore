@@ -48,6 +48,14 @@ func TestValidate(t *testing.T) {
 		{"bad account kind", func(r *PostRequest) { r.Legs[0].Account.Kind = "nope" }, ErrInvalidJournal},
 		{"reversal without target", func(r *PostRequest) { r.Kind = KindReversal }, ErrInvalidJournal},
 		{"non-reversal with target", func(r *PostRequest) { r.ReversesJournalID = "j" }, ErrInvalidJournal},
+		{"reversal bad uuid", func(r *PostRequest) {
+			r.Kind = KindReversal
+			r.ReversesJournalID = "not-a-uuid"
+		}, ErrInvalidJournal},
+		{"settle bad uuid", func(r *PostRequest) {
+			r.Kind = KindWithdrawalFinalize
+			r.SettlesJournalID = "not-a-uuid"
+		}, ErrInvalidJournal},
 		{"finalize without target", func(r *PostRequest) { r.Kind = KindWithdrawalFinalize }, ErrInvalidJournal},
 		{"fail without target", func(r *PostRequest) { r.Kind = KindWithdrawalFail }, ErrInvalidJournal},
 		{"fund with settle target", func(r *PostRequest) { r.SettlesJournalID = "j" }, ErrInvalidJournal},
@@ -103,8 +111,11 @@ func TestValidateTooManyLegs(t *testing.T) {
 
 func TestValidateBalancesPerCurrency(t *testing.T) {
 	// Two currencies each balanced independently are valid, even though the
-	// total across all legs is not meaningful.
+	// total across all legs is not meaningful. Reversal has no fixed shape, so
+	// this isolates the per-currency balance rule.
 	req := baseReq()
+	req.Kind = KindReversal
+	req.ReversesJournalID = "11111111-1111-1111-1111-111111111111"
 	req.Legs = []Leg{
 		{Account: AccountRef{Kind: KindSettlement, OwnerRef: "core", Currency: "USD"}, Side: Debit, Amount: 100},
 		{Account: AccountRef{Kind: KindUserWallet, OwnerRef: "u1", Currency: "USD"}, Side: Credit, Amount: 100},

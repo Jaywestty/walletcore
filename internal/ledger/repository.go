@@ -741,6 +741,9 @@ func (r *Repository) Balance(ctx context.Context, ref AccountRef) (int64, error)
 // the legs expressed as account references. It returns ErrJournalNotFound when
 // no journal has the given id.
 func (r *Repository) GetJournal(ctx context.Context, id string) (Journal, error) {
+	if !isUUID(id) {
+		return Journal{}, fmt.Errorf("%w: %s", ErrJournalNotFound, id)
+	}
 	const q = `
 		SELECT j.id::text, j.kind, j.idempotency_key, j.fingerprint, j.actor, j.reason,
 		       j.metadata, COALESCE(j.reverses_journal_id::text, ''),

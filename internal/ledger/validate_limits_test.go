@@ -10,12 +10,12 @@ func TestMaxAmountBoundaries(t *testing.T) {
 	mk := func(amount int64) PostRequest {
 		return PostRequest{
 			IdempotencyKey: "k",
-			Kind:           KindTransfer,
+			Kind:           KindFund,
 			Actor:          "a",
 			Reason:         "r",
 			Legs: []Leg{
-				{Account: AccountRef{Kind: KindUserWallet, OwnerRef: "u1", Currency: "USD"}, Side: Debit, Amount: amount},
-				{Account: AccountRef{Kind: KindSettlement, OwnerRef: "core", Currency: "USD"}, Side: Credit, Amount: amount},
+				{Account: AccountRef{Kind: KindSettlement, OwnerRef: "core", Currency: "USD"}, Side: Debit, Amount: amount},
+				{Account: AccountRef{Kind: KindUserWallet, OwnerRef: "u1", Currency: "USD"}, Side: Credit, Amount: amount},
 			},
 		}
 	}
