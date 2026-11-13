@@ -20,6 +20,8 @@ import (
 	"github.com/Jaywestty/walletcore/internal/config"
 	"github.com/Jaywestty/walletcore/internal/db"
 	"github.com/Jaywestty/walletcore/internal/httpapi"
+	"github.com/Jaywestty/walletcore/internal/ledger"
+	"github.com/Jaywestty/walletcore/internal/wallet"
 )
 
 func main() {
@@ -49,12 +51,21 @@ func run() error {
 	}
 	defer pool.Close()
 
+	repo := ledger.NewRepository(pool.Pool, ledger.Options{
+		LockTimeout: cfg.LedgerLockTimeout,
+		MaxRetries:  cfg.LedgerMaxRetries,
+	})
+	svc := wallet.New(repo)
+	auth := httpapi.NewAPIKeyAuthenticator(cfg.APIKeys)
+
 	handler := httpapi.NewRouter(httpapi.Options{
 		Logger:            logger,
 		ReadinessPinger:   pool,
 		ReadyTimeout:      2 * time.Second,
 		TrustProxyHeaders: cfg.TrustProxyHeaders,
 		RequestTimeout:    cfg.HTTPRequestTimeout,
+		Service:           svc,
+		Authenticator:     auth,
 	})
 
 	srv := &http.Server{
