@@ -48,6 +48,13 @@ func (f *fakeLedger) GetJournal(_ context.Context, id string) (ledger.Journal, e
 	return j, nil
 }
 
+func (f *fakeLedger) ListEntries(_ context.Context, ref ledger.AccountRef, _ int64, limit int) (ledger.StatementPage, error) {
+	if _, ok := f.balances[ref.OwnerRef+"|"+string(ref.Kind)+"|"+ref.Currency]; !ok {
+		return ledger.StatementPage{}, ledger.ErrAccountNotFound
+	}
+	return ledger.StatementPage{}, nil
+}
+
 func lastPosted(t *testing.T, f *fakeLedger) ledger.PostRequest {
 	t.Helper()
 	if len(f.posted) == 0 {

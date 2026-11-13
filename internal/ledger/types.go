@@ -134,6 +134,16 @@ type Entry struct {
 	Amount    int64
 	Currency  string
 	EntrySeq  int64
+	// JournalKind is the kind of the entry's journal, populated by ListEntries.
+	JournalKind JournalKind
+}
+
+// StatementPage is a page of entries for one account, ordered by entry_seq.
+type StatementPage struct {
+	Entries []Entry
+	// NextAfterSeq is the cursor for the next page (the last entry_seq). It is
+	// zero when there are no more entries.
+	NextAfterSeq int64
 }
 
 // Balance is the cached balance for one account, held normal-side positive.

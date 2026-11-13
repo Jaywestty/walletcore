@@ -202,3 +202,28 @@ func (s *Service) requestTerms(ctx context.Context, requestID string) (owner str
 	}
 	return "", 0, "", fmt.Errorf("%w: request has no wallet debit leg", ledger.ErrInvalidJournal)
 }
+
+// Statement returns a page of a user's wallet entries. A missing account counts
+// as zero, so a user who never transacted gets an empty page rather than an
+// error.
+func (s *Service) Statement(ctx context.Context, owner, currency string, afterSeq int64, limit int) (ledger.StatementPage, error) {
+	if strings.TrimSpace(owner) == "" {
+		return ledger.StatementPage{}, fmt.Errorf("%w: owner is required", ErrInvalidRequest)
+	}
+	if err := validateCurrency(currency); err != nil {
+		return ledger.StatementPage{}, err
+	}
+	page, err := s.ledger.ListEntries(ctx, walletRef(owner, currency), afterSeq, limit)
+	if err != nil {
+		if errors.Is(err, ledger.ErrAccountNotFound) {
+			return ledger.StatementPage{}, nil
+		}
+		return ledger.StatementPage{}, err
+	}
+	return page, nil
+}
+
+// Journal returns a journal with its entries.
+func (s *Service) Journal(ctx context.Context, id string) (ledger.Journal, error) {
+	return s.ledger.GetJournal(ctx, id)
+}

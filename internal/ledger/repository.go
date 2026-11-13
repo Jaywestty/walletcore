@@ -20,6 +20,7 @@ type Store interface {
 	PostTransaction(ctx context.Context, req PostRequest) (Journal, error)
 	Balance(ctx context.Context, ref AccountRef) (int64, error)
 	GetJournal(ctx context.Context, id string) (Journal, error)
+	ListEntries(ctx context.Context, ref AccountRef, afterSeq int64, limit int) (StatementPage, error)
 }
 
 // Repository is the pgx implementation of Store. It owns one shared pool and
@@ -172,7 +173,7 @@ func (r *Repository) postOnce(ctx context.Context, req PostRequest, fingerprint 
 		return Journal{}, err
 	}
 
-	journalID, err := r.insertJournal(ctx, tx, req, fingerprint)
+	journalID, postedAt, err := r.insertJournal(ctx, tx, req, fingerprint)
 	if err != nil {
 		return Journal{}, err
 	}
@@ -204,6 +205,7 @@ func (r *Repository) postOnce(ctx context.Context, req PostRequest, fingerprint 
 		ReversesJournalID: req.ReversesJournalID,
 		SettlesJournalID:  req.SettlesJournalID,
 		OccurredAt:        req.OccurredAt,
+		PostedAt:          postedAt,
 		Entries:           entries,
 		Balances:          balances,
 		Legs:              req.Legs,
@@ -534,7 +536,7 @@ func (r *Repository) applyBalances(ctx context.Context, tx pgx.Tx, legs []Leg, a
 }
 
 // insertJournal writes the journal header and returns its id.
-func (r *Repository) insertJournal(ctx context.Context, tx pgx.Tx, req PostRequest, fingerprint string) (string, error) {
+func (r *Repository) insertJournal(ctx context.Context, tx pgx.Tx, req PostRequest, fingerprint string) (string, time.Time, error) {
 	// A nil map must be stored as an empty JSON object, never JSON null.
 	meta := req.Metadata
 	if meta == nil {
@@ -542,7 +544,7 @@ func (r *Repository) insertJournal(ctx context.Context, tx pgx.Tx, req PostReque
 	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
-		return "", fmt.Errorf("marshal metadata: %w", err)
+		return "", time.Time{}, fmt.Errorf("marshal metadata: %w", err)
 	}
 
 	var reverses *string
@@ -558,16 +560,19 @@ func (r *Repository) insertJournal(ctx context.Context, tx pgx.Tx, req PostReque
 		INSERT INTO ledger_journals
 			(kind, idempotency_key, fingerprint, actor, reason, metadata, reverses_journal_id, settles_journal_id, occurred_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		RETURNING id::text`
-	var id string
+		RETURNING id::text, posted_at`
+	var (
+		id       string
+		postedAt time.Time
+	)
 	err = tx.QueryRow(ctx, insert,
 		string(req.Kind), req.IdempotencyKey, fingerprint, req.Actor, req.Reason,
 		metaJSON, reverses, settles, req.OccurredAt,
-	).Scan(&id)
+	).Scan(&id, &postedAt)
 	if err != nil {
-		return "", fmt.Errorf("insert journal: %w", MapError(err))
+		return "", time.Time{}, fmt.Errorf("insert journal: %w", MapError(err))
 	}
-	return id, nil
+	return id, postedAt, nil
 }
 
 // insertEntries writes the legs and returns them with their generated ids.
@@ -735,6 +740,71 @@ func (r *Repository) Balance(ctx context.Context, ref AccountRef) (int64, error)
 		return 0, fmt.Errorf("read balance: %w", MapError(err))
 	}
 	return bal, nil
+}
+
+// ListEntries returns a keyset page of entries for an account, ordered by
+// entry_seq ascending. afterSeq is the last seen cursor (0 for the first page).
+// limit is clamped to 1..200. It returns ErrAccountNotFound when no account
+// exists for the reference.
+func (r *Repository) ListEntries(ctx context.Context, ref AccountRef, afterSeq int64, limit int) (StatementPage, error) {
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	var accountID string
+	err := r.pool.QueryRow(ctx,
+		`SELECT id::text FROM ledger_accounts WHERE kind = $1 AND owner_ref = $2 AND currency = $3`,
+		string(ref.Kind), ref.OwnerRef, ref.Currency,
+	).Scan(&accountID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return StatementPage{}, fmt.Errorf("%w: %s/%s/%s", ErrAccountNotFound, ref.Kind, ref.OwnerRef, ref.Currency)
+		}
+		return StatementPage{}, fmt.Errorf("find account: %w", MapError(err))
+	}
+
+	// Fetch one extra row to know whether a next page exists.
+	const q = `
+		SELECT e.id::text, e.journal_id::text, e.side, e.amount, e.currency, e.entry_seq, j.kind
+		FROM ledger_entries e
+		JOIN ledger_journals j ON j.id = e.journal_id
+		WHERE e.account_id = $1 AND e.entry_seq > $2
+		ORDER BY e.entry_seq
+		LIMIT $3`
+	rows, err := r.pool.Query(ctx, q, accountID, afterSeq, limit+1)
+	if err != nil {
+		return StatementPage{}, fmt.Errorf("list entries: %w", MapError(err))
+	}
+	defer rows.Close()
+
+	var entries []Entry
+	for rows.Next() {
+		var (
+			e    Entry
+			side string
+			kind string
+		)
+		if err := rows.Scan(&e.ID, &e.JournalID, &side, &e.Amount, &e.Currency, &e.EntrySeq, &kind); err != nil {
+			return StatementPage{}, fmt.Errorf("scan entry: %w", err)
+		}
+		e.AccountID = accountID
+		e.Side = Side(side)
+		e.JournalKind = JournalKind(kind)
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return StatementPage{}, fmt.Errorf("list entries: %w", MapError(err))
+	}
+
+	var next int64
+	if len(entries) > limit {
+		entries = entries[:limit]
+		next = entries[limit-1].EntrySeq
+	}
+	return StatementPage{Entries: entries, NextAfterSeq: next}, nil
 }
 
 // GetJournal returns a journal header with its entries ordered by entry_seq and

@@ -54,7 +54,7 @@ tasks:
       CGO_ENABLED: "1"
       INTEGRATION: "1"
     cmds:
-      - go test -tags integration -race -timeout 20m ./internal/ledger/ ./internal/wallet/ ./internal/db/migrations_test/
+      - go test -tags integration -race -timeout 20m ./internal/ledger/ ./internal/wallet/ ./internal/httpapi/ ./internal/db/migrations_test/
 
   test-concurrency:
     desc: Run the contention tests three times under the race detector
@@ -104,3 +104,4 @@ tasks:
     desc: Stop the local databases and delete their volumes
     cmds:
       - docker compose down -v
+

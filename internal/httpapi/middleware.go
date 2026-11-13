@@ -14,6 +14,9 @@ import (
 // caller.
 const RequestIDHeader = "X-Request-Id"
 
+// chiRouter is the subset of a chi.Router used when mounting routes.
+type chiRouter = chi.Router
+
 // newRouter creates a chi router with the base middleware stack.
 //
 // Middleware order matters: the request id is assigned first so every later
@@ -21,15 +24,47 @@ const RequestIDHeader = "X-Request-Id"
 func newRouter(trustProxyHeaders bool, requestTimeout time.Duration) *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(requestIDMiddleware)
+	r.Use(recoverMiddleware())
 	if trustProxyHeaders {
 		r.Use(middleware.RealIP)
 	}
-	r.Use(middleware.Recoverer)
 	if requestTimeout <= 0 {
 		requestTimeout = 15 * time.Second
 	}
 	r.Use(middleware.Timeout(requestTimeout))
 	return r
+}
+
+// recoverMiddleware turns a panic into the JSON error envelope with 500.
+func recoverMiddleware() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					writeError(w, r, newAPIError(http.StatusInternalServerError, codeInternal))
+				}
+			}()
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// authenticateMiddleware requires a valid principal on /v1 routes.
+func authenticateMiddleware(a Authenticator) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			p, err := a.Authenticate(r)
+			if err != nil {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="walletcore"`)
+				writeError(w, r, newAPIError(http.StatusUnauthorized, codeUnauthorized))
+				return
+			}
+			if holder := holderFrom(r.Context()); holder != nil {
+				holder.name = p.Name
+			}
+			next.ServeHTTP(w, r.WithContext(withPrincipal(r.Context(), p)))
+		})
+	}
 }
 
 // requestIDMiddleware reuses an incoming request id or generates one, stores it

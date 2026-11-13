@@ -1,0 +1,329 @@
+openapi: 3.0.3
+info:
+  title: WalletCore API
+  version: "1.0"
+  description: >
+    Wallet and double-entry ledger API. Amounts are integers in minor units.
+    Timestamps are RFC 3339 UTC. Every write endpoint requires an
+    Idempotency-Key header and returns 201 on a new journal or 200 on a replay.
+servers:
+  - url: http://localhost:8080
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: API key from API_KEYS, sent as Authorization Bearer <key>.
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: 1 to 200 runes, no control characters.
+      schema:
+        type: string
+    JournalID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Owner:
+      name: owner
+      in: path
+      required: true
+      schema:
+        type: string
+    Currency:
+      name: currency
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[A-Z]{3}$"
+  schemas:
+    Entry:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        journal_id: { type: string, format: uuid }
+        journal_kind: { type: string }
+        account_id: { type: string, format: uuid }
+        side: { type: string, enum: [Dr, Cr] }
+        amount: { type: integer, format: int64 }
+        currency: { type: string }
+        entry_seq: { type: integer, format: int64 }
+    Journal:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string }
+        idempotency_key: { type: string }
+        actor: { type: string }
+        reason: { type: string }
+        metadata: { type: object, additionalProperties: { type: string } }
+        reverses_journal_id: { type: string, format: uuid, nullable: true }
+        settles_journal_id: { type: string, format: uuid, nullable: true }
+        occurred_at: { type: string, format: date-time }
+        posted_at: { type: string, format: date-time }
+        replayed: { type: boolean }
+        entries:
+          type: array
+          items: { $ref: "#/components/schemas/Entry" }
+    Balances:
+      type: object
+      properties:
+        owner: { type: string }
+        currency: { type: string }
+        available: { type: integer, format: int64 }
+        held: { type: integer, format: int64 }
+    Statement:
+      type: object
+      properties:
+        owner: { type: string }
+        currency: { type: string }
+        entries:
+          type: array
+          items: { $ref: "#/components/schemas/Entry" }
+        next_after_seq: { type: integer, format: int64 }
+    FundRequest:
+      type: object
+      required: [owner, amount, currency]
+      additionalProperties: false
+      properties:
+        owner: { type: string }
+        amount: { type: integer, format: int64, minimum: 1 }
+        currency: { type: string, pattern: "^[A-Z]{3}$" }
+    TransferRequest:
+      type: object
+      required: [from, to, amount, currency]
+      additionalProperties: false
+      properties:
+        from: { type: string }
+        to: { type: string }
+        amount: { type: integer, format: int64, minimum: 1 }
+        fee: { type: integer, format: int64, minimum: 0, default: 0 }
+        currency: { type: string, pattern: "^[A-Z]{3}$" }
+    FeeRequest:
+      type: object
+      required: [owner, amount, currency]
+      additionalProperties: false
+      properties:
+        owner: { type: string }
+        amount: { type: integer, format: int64, minimum: 1 }
+        currency: { type: string, pattern: "^[A-Z]{3}$" }
+    WithdrawRequest:
+      type: object
+      required: [owner, amount, currency]
+      additionalProperties: false
+      properties:
+        owner: { type: string }
+        amount: { type: integer, format: int64, minimum: 1 }
+        currency: { type: string, pattern: "^[A-Z]{3}$" }
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            request_id: { type: string }
+  responses:
+    JournalCreated:
+      description: New journal created.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Journal" }
+    Error:
+      description: Error envelope.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+security:
+  - bearer: []
+paths:
+  /v1/funds:
+    post:
+      summary: Fund a wallet from settlement
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FundRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/JournalCreated" }
+        "200":
+          description: Replay of the original journal.
+          headers:
+            Idempotent-Replayed: { schema: { type: string }, description: "true" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Journal" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /v1/transfers:
+    post:
+      summary: Transfer between two wallets with an optional fee
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TransferRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/JournalCreated" }
+        "200": { $ref: "#/components/responses/JournalCreated" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /v1/fees:
+    post:
+      summary: Charge a fee to a wallet
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FeeRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/JournalCreated" }
+        "200": { $ref: "#/components/responses/JournalCreated" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /v1/withdrawals:
+    post:
+      summary: Request a withdrawal into holds
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WithdrawRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/JournalCreated" }
+        "200": { $ref: "#/components/responses/JournalCreated" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /v1/withdrawals/{id}/finalize:
+    post:
+      summary: Settle a withdrawal request successfully
+      parameters:
+        - $ref: "#/components/parameters/JournalID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "201": { $ref: "#/components/responses/JournalCreated" }
+        "200": { $ref: "#/components/responses/JournalCreated" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /v1/withdrawals/{id}/fail:
+    post:
+      summary: Settle a withdrawal request as failed
+      parameters:
+        - $ref: "#/components/parameters/JournalID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "201": { $ref: "#/components/responses/JournalCreated" }
+        "200": { $ref: "#/components/responses/JournalCreated" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /v1/journals/{id}/reversal:
+    post:
+      summary: Reverse a fund, transfer or fee journal
+      parameters:
+        - $ref: "#/components/parameters/JournalID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "201": { $ref: "#/components/responses/JournalCreated" }
+        "200": { $ref: "#/components/responses/JournalCreated" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /v1/wallets/{owner}/{currency}:
+    get:
+      summary: Read available and held balances
+      parameters:
+        - $ref: "#/components/parameters/Owner"
+        - $ref: "#/components/parameters/Currency"
+      responses:
+        "200":
+          description: Balances.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Balances" }
+        "401": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+  /v1/wallets/{owner}/{currency}/entries:
+    get:
+      summary: Statement, cursor paginated by entry_seq
+      parameters:
+        - $ref: "#/components/parameters/Owner"
+        - $ref: "#/components/parameters/Currency"
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: after_seq
+          in: query
+          schema: { type: integer, format: int64, minimum: 0 }
+      responses:
+        "200":
+          description: A page of entries.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Statement" }
+        "401": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+  /v1/journals/{id}:
+    get:
+      summary: Read a journal with its entries
+      parameters:
+        - $ref: "#/components/parameters/JournalID"
+      responses:
+        "200":
+          description: Journal.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Journal" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /healthz:
+    get:
+      summary: Liveness
+      security: []
+      responses:
+        "200": { description: Alive }
+  /readyz:
+    get:
+      summary: Readiness, checks the database
+      security: []
+      responses:
+        "200": { description: Ready }
+        "503": { description: Not ready }

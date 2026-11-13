@@ -3,7 +3,6 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"time"
@@ -32,6 +31,10 @@ type Options struct {
 	TrustProxyHeaders bool
 	// RequestTimeout bounds the total handler time for one request.
 	RequestTimeout time.Duration
+	// Service backs the /v1 wallet routes. Required for /v1 to be mounted.
+	Service WalletService
+	// Authenticator guards /v1 routes. Required for /v1 to be mounted.
+	Authenticator Authenticator
 }
 
 // NewRouter builds the application router. Routes live here so main only wires
@@ -45,8 +48,29 @@ func NewRouter(opts Options) http.Handler {
 	if opts.Logger != nil {
 		r.Use(LoggingMiddleware(opts.Logger))
 	}
+
+	// Health routes are unauthenticated.
 	r.Get("/healthz", handleHealthz)
 	r.Get("/readyz", handleReadyz(opts.ReadinessPinger, opts.ReadyTimeout))
+
+	if opts.Service != nil && opts.Authenticator != nil {
+		h := &handlers{svc: opts.Service, logger: opts.Logger}
+		r.Route("/v1", func(r chiRouter) {
+			r.Use(authenticateMiddleware(opts.Authenticator))
+
+			r.Post("/funds", h.fund)
+			r.Post("/transfers", h.transfer)
+			r.Post("/fees", h.fee)
+			r.Post("/withdrawals", h.withdraw)
+			r.Post("/withdrawals/{id}/finalize", h.finalize)
+			r.Post("/withdrawals/{id}/fail", h.failSettlement)
+			r.Post("/journals/{id}/reversal", h.reverse)
+
+			r.Get("/wallets/{owner}/{currency}", h.balances)
+			r.Get("/wallets/{owner}/{currency}/entries", h.statement)
+			r.Get("/journals/{id}", h.journal)
+		})
+	}
 	return r
 }
 
@@ -70,10 +94,4 @@ func handleReadyz(p Pinger, timeout time.Duration) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	}
-}
-
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
 }

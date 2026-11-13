@@ -57,6 +57,9 @@ type Config struct {
 	// LedgerMaxRetries is the maximum number of automatic retries for a
 	// posting that fails with a deadlock or serialization error.
 	LedgerMaxRetries int
+
+	// APIKeys maps a principal name to its bearer key, parsed from API_KEYS.
+	APIKeys map[string]string
 }
 
 // Load reads configuration from the process environment, applies defaults and
@@ -97,6 +100,9 @@ func load(getenv loader) (*Config, error) {
 	if cfg.LedgerMaxRetries, err = intEnv(getenv, "LEDGER_MAX_RETRIES", 3, 0); err != nil {
 		return nil, err
 	}
+	if cfg.APIKeys, err = parseAPIKeys(getenv("API_KEYS")); err != nil {
+		return nil, err
+	}
 	if cfg.DBMaxConns, err = int32Env(getenv, "DB_MAX_CONNS", cfg.DBMaxConns, 1); err != nil {
 		return nil, err
 	}
@@ -132,6 +138,39 @@ func load(getenv loader) (*Config, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// parseAPIKeys parses "name:key,name2:key2" into a map. Each key must be at
+// least 32 characters. Errors never include the key value.
+func parseAPIKeys(raw string) (map[string]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, errors.New("API_KEYS is required: provide one or more name:key entries")
+	}
+	out := map[string]string{}
+	for _, pair := range strings.Split(raw, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		name, key, ok := strings.Cut(pair, ":")
+		name = strings.TrimSpace(name)
+		key = strings.TrimSpace(key)
+		if !ok || name == "" || key == "" {
+			return nil, fmt.Errorf("API_KEYS entry %q must be name:key", name)
+		}
+		if len(key) < 32 {
+			return nil, fmt.Errorf("API_KEYS key for %q must be at least 32 characters", name)
+		}
+		if _, dup := out[name]; dup {
+			return nil, fmt.Errorf("API_KEYS has duplicate name %q", name)
+		}
+		out[name] = key
+	}
+	if len(out) == 0 {
+		return nil, errors.New("API_KEYS is required: provide one or more name:key entries")
+	}
+	return out, nil
 }
 
 // validate applies cross-field rules that individual readers cannot express.
