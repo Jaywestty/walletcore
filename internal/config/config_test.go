@@ -6,9 +6,25 @@ import (
 	"time"
 )
 
+// testAPIKey is a valid 32+ character key for tests.
+const testAPIKey = "test-key-0123456789abcdef0123456789abcdef"
+
 // envMap turns a map into a loader so tests never touch the real environment.
+// It supplies a default API_KEYS unless the map overrides it.
 func envMap(m map[string]string) loader {
+	if _, ok := m["API_KEYS"]; !ok {
+		m = withDefaultAPIKeys(m)
+	}
 	return func(k string) string { return m[k] }
+}
+
+func withDefaultAPIKeys(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m)+1)
+	for k, v := range m {
+		out[k] = v
+	}
+	out["API_KEYS"] = "svc:" + testAPIKey
+	return out
 }
 
 func TestLoadDefaults(t *testing.T) {
@@ -151,5 +167,29 @@ func TestLedgerTimeoutBelowRequestTimeout(t *testing.T) {
 	}
 	if cfg.LedgerLockTimeout >= cfg.HTTPRequestTimeout {
 		t.Fatalf("lock timeout %s must be below request timeout %s", cfg.LedgerLockTimeout, cfg.HTTPRequestTimeout)
+	}
+}
+
+func TestParseAPIKeys(t *testing.T) {
+	good := "svc:" + testAPIKey + ",ops:" + strings.Repeat("b", 32)
+	m, err := parseAPIKeys(good)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m["svc"] != testAPIKey || m["ops"] != strings.Repeat("b", 32) {
+		t.Fatalf("parsed map = %v", m)
+	}
+
+	bad := map[string]string{
+		"empty":      "",
+		"no colon":   "svc" + testAPIKey,
+		"short key":  "svc:short",
+		"empty name": ":" + testAPIKey,
+		"duplicate":  "svc:" + testAPIKey + ",svc:" + strings.Repeat("c", 32),
+	}
+	for name, raw := range bad {
+		if _, err := parseAPIKeys(raw); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
 	}
 }

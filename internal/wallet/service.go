@@ -20,6 +20,7 @@ type Ledger interface {
 	PostTransaction(ctx context.Context, req ledger.PostRequest) (ledger.Journal, error)
 	Balance(ctx context.Context, ref ledger.AccountRef) (int64, error)
 	GetJournal(ctx context.Context, id string) (ledger.Journal, error)
+	ListEntries(ctx context.Context, ref ledger.AccountRef, afterSeq int64, limit int) (ledger.StatementPage, error)
 }
 
 // Service runs wallet operations.
