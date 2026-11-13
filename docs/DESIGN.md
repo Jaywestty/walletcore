@@ -302,3 +302,56 @@ against the target inside the transaction.
 
 Settlement and fee accounts always use owner `core`. A leg with a different
 shape is rejected with `ErrInvalidJournal` before any database work.
+
+## HTTP API
+
+The API lives under /v1 and speaks JSON. Amounts are integers in minor units and
+timestamps are RFC 3339 UTC. Every write requires an Idempotency-Key header and
+maps a created journal to 201, a replay to 200 with Idempotent-Replayed: true.
+
+### Error mapping
+
+Every error uses one envelope: {"error":{"code","message","request_id"}}.
+Messages are fixed safe strings per code; raw database or Go error text never
+reaches a client. An unexpected error is logged at error level with the request
+id and returned as internal_error.
+
+| Code | Status | Condition |
+|---|---|---|
+| invalid_request | 422 | invalid journal, invalid amount, unbalanced, currency mismatch, wallet invalid request |
+| insufficient_funds | 409 | a balance would go negative |
+| account_inactive | 422 | posting to a suspended account |
+| not_found | 404 | account or journal does not exist |
+| idempotency_conflict | 409 | key reused with a different payload |
+| already_reversed | 409 | journal already reversed |
+| already_settled | 409 | withdrawal already settled |
+| busy | 503, Retry-After 1 | lock timeout, deadlock or serialization failure |
+| outcome_unknown | 503, Retry-After 1 | ambiguous commit, retry with the same key |
+| timeout | 503 | request deadline exceeded or cancelled |
+| internal_error | 500 | anything else, logged |
+
+Malformed or structurally invalid JSON is 400. Semantically invalid input that
+parses but breaks a rule is 422.
+
+### Why the actor comes from the principal
+
+The actor on every journal is the authenticated principal, never a field in the
+request body. A caller cannot claim to act as someone else. Bodies are decoded
+with DisallowUnknownFields, so an attempt to pass an actor is rejected as an
+unknown field.
+
+### Timeout and retry guidance
+
+A posting waits at most LEDGER_LOCK_TIMEOUT for row locks, and an HTTP request
+is bounded by HTTP_REQUEST_TIMEOUT, which is validated to be larger. On busy,
+outcome_unknown or timeout, the client should retry with the same
+Idempotency-Key. Because the ledger is idempotent, a retry either replays the
+committed journal or posts it once.
+
+### The ambiguous commit contract
+
+If the connection fails during COMMIT, the server returns outcome_unknown and
+the client cannot know whether the write landed. The only correct action is to
+retry with the same Idempotency-Key and the same body. The ledger resolves the
+ambiguity: it replays if the first commit succeeded, or posts once if it did
+not. Retrying with a new key risks a double post and is never correct.
